@@ -476,12 +476,6 @@ class GenerateDocumentationCommand extends Command{
                     ],
                 ],
             ],
-            '400' => ['$ref' => '#/components/responses/BadRequest'],
-            '401' => ['$ref' => '#/components/responses/Unauthorized'],
-            '403' => ['$ref' => '#/components/responses/Forbidden'],
-            '404' => ['$ref' => '#/components/responses/NotFound'],
-            '422' => ['$ref' => '#/components/responses/ValidationError'],
-            '500' => ['$ref' => '#/components/responses/ServerError'],
         ];
         if($method === 'post'){
             $responses['201'] = [

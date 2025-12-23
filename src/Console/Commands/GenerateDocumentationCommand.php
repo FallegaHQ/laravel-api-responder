@@ -467,6 +467,15 @@ class GenerateDocumentationCommand extends Command{
                 };
             }
         }
+        // DELETE methods only return 204 No Content
+        if($method === 'delete'){
+            return [
+                '204' => [
+                    'description' => 'Resource deleted successfully (no content)',
+                ],
+            ];
+        }
+
         $responses = [
             '200' => [
                 'description' => 'Successful response',
@@ -477,6 +486,7 @@ class GenerateDocumentationCommand extends Command{
                 ],
             ],
         ];
+        
         if($method === 'post'){
             $responses['201'] = [
                 'description' => 'Resource created successfully',
@@ -485,11 +495,6 @@ class GenerateDocumentationCommand extends Command{
                         'schema' => $successSchema,
                     ],
                 ],
-            ];
-        }
-        if($method === 'delete'){
-            $responses['204'] = [
-                'description' => 'Resource deleted successfully (no content)',
             ];
         }
 

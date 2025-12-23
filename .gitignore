@@ -1,0 +1,34 @@
+### Composer ###
+composer.phar
+/vendor/
+
+### PHPCodeSniffer ###
+phpcs.xml
+
+### PhpStorm ###
+.idea/*
+
+!.idea/codeStyles
+!.idea/runConfigurations
+
+### PHPUnit ###
+# Generated files
+.phpunit.result.cache
+.phpunit.cache
+
+### VisualStudioCode ###
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+
+# Local History for Visual Studio Code
+.history/
+
+# Built Visual Studio Code Extensions
+*.vsix
+
+# Ignore all local history of files
+.history

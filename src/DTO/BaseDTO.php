@@ -35,6 +35,7 @@ abstract class BaseDTO implements Transformable{
      * @throws \ReflectionException
      */
     public function toArray($user = null): array{
+        logger()->debug('toArray called on instance ' . spl_object_id($this));
         // Fire before transform event
         if(config('api-responder.events.fire_before_transform')){
             $this->eventDispatcher->beforeTransform($this->source);

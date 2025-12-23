@@ -32,3 +32,6 @@ phpcs.xml
 
 # Ignore all local history of files
 .history
+
+# Test app
+test-app/

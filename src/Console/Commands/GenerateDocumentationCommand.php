@@ -113,7 +113,7 @@ class GenerateDocumentationCommand extends Command{
                 'description' => $this->buildDescription(),
             ],
             'servers'    => [
-                ['url' => config('app.url') . '/api'],
+                ['url' => config('app.url')],
             ],
             'paths'      => $paths,
             'components' => [
@@ -357,7 +357,7 @@ class GenerateDocumentationCommand extends Command{
 
     protected function extractParameters(string $path): array{
         $parameters = [];
-        preg_match_all('/\{([^}]+)\}/', $path, $matches);
+        preg_match_all('/\{([^}]+)}/', $path, $matches);
         foreach($matches[1] as $param){
             $parameters[] = [
                 'name'        => $param,

@@ -81,51 +81,74 @@ return Application::configure(basePath: dirname(__DIR__))
 
 ### Create a DTO
 
+DTOs automatically include all model attributes. Define methods only for **additional computed fields**:
+
 ```php
 <?php
 
 namespace App\DTOs;
 
 use FallegaHQ\ApiResponder\DTO\BaseDTO;
-use FallegaHQ\ApiResponder\DTO\Attributes\{ComputedField, Visible, Cached, Versioned};
+use FallegaHQ\ApiResponder\DTO\Attributes\{ComputedField, Visible, Cached};
 
 class UserDTO extends BaseDTO
 {
-    #[ComputedField]
-    public function id(): int
-    {
-        return $this->source->id;
-    }
-
-    #[ComputedField]
-    public function name(): string
-    {
-        return $this->source->name;
-    }
-
-    #[ComputedField]
-    public function email(): string
-    {
-        return $this->source->email;
-    }
-
-    #[ComputedField]
-    #[Visible(['admin', 'manager'])]
-    public function role(): string
-    {
-        return $this->source->role;
-    }
-
-    #[ComputedField]
+    #[ComputedField(name: 'posts_count')]
     #[Cached(ttl: 3600)]
     public function postsCount(): int
     {
         return $this->source->posts()->count();
     }
+
+    #[ComputedField(name: 'is_admin')]
+    #[Visible(['admin', 'manager'])]
+    public function isAdmin(): bool
+    {
+        return $this->source->role === 'admin';
+    }
+
+    #[ComputedField(name: 'full_name')]
+    public function fullName(): string
+    {
+        return $this->source->first_name . ' ' . $this->source->last_name;
+    }
+
+    protected function getHiddenFields(): array
+    {
+        return ['password', 'remember_token'];
+    }
+}
+```
+
+### Link DTO to Model
+
+Use the `#[UseDto]` attribute on your model:
+
+```php
+<?php
+
+namespace App\Models;
+
+use App\DTOs\UserDTO;
+use FallegaHQ\ApiResponder\Attributes\UseDto;
+use Illuminate\Database\Eloquent\Model;
+
+#[UseDto(UserDTO::class)]
+class User extends Model
+{
+    protected $fillable = ['name', 'email', 'password'];
+    protected $hidden = ['password', 'remember_token'];
+
+    public function posts()
+    {
+        return $this->hasMany(Post::class);
+    }
 }
 ```
 
 ### Create a Controller
+
+With `#[UseDto]` on the model, transformation happens automatically:
 
 ```php
 <?php
@@ -133,7 +156,6 @@ class UserDTO extends BaseDTO
 namespace App\Http\Controllers\Api;
 
 use App\Models\User;
-use App\DTOs\UserDTO;
 use FallegaHQ\ApiResponder\Http\Controllers\BaseApiController;
 use Illuminate\Http\Request;
 
@@ -143,15 +165,12 @@ class UserController extends BaseApiController
     {
         $users = User::paginate(15);
 
-        return $this->success(
-            $users->through(fn($user) => UserDTO::from($user)),
-            'Users retrieved successfully'
-        );
+        return $this->success($users, 'Users retrieved successfully');
     }
 
     public function show(User $user)
     {
-        return $this->success(UserDTO::from($user));
+        return $this->success($user);
     }
 
     public function store(Request $request)
@@ -163,7 +182,7 @@ class UserController extends BaseApiController
 
         $user = User::create($validated);
 
-        return $this->created(UserDTO::from($user), 'User created successfully');
+        return $this->created($user, 'User created successfully');
     }
 
     public function destroy(User $user)
@@ -187,7 +206,10 @@ class UserController extends BaseApiController
             "id": 1,
             "name": "John Doe",
             "email": "john@example.com",
-            "posts_count": 42
+            "created_at": "2024-12-22T10:00:00+00:00",
+            "posts_count": 42,
+            "is_admin": true,
+            "full_name": "John Doe"
         }
     ],
     "meta": {
@@ -261,11 +283,11 @@ GET /api/users?include=posts,comments
 Control field visibility based on user roles:
 
 ```php
-#[ComputedField]
+#[ComputedField(name: 'sensitive_data')]
 #[Visible(['admin', 'manager'])]
 public function sensitiveData(): string
 {
-    return $this->source->sensitive_data;
+    return $this->source->internal_data;
 }
 ```
 
@@ -274,7 +296,7 @@ public function sensitiveData(): string
 Cache expensive computations:
 
 ```php
-#[ComputedField]
+#[ComputedField(name: 'statistics')]
 #[Cached(ttl: 3600, key: 'user_stats')]
 public function statistics(): array
 {
@@ -290,7 +312,7 @@ public function statistics(): array
 Version your API responses:
 
 ```php
-#[ComputedField]
+#[ComputedField(name: 'new_field')]
 #[Versioned(['v2'])]
 public function newField(): string
 {
@@ -309,20 +331,43 @@ curl -H "X-API-Version: v2" https://api.example.com/users
 Use fluent assertion helpers:
 
 ```php
-use FallegaHQ\ApiResponder\Tests\ApiTestCase;
+use Tests\TestCase;
+use FallegaHQ\ApiResponder\Tests\AssertableApiResponse;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 
-class UserControllerTest extends ApiTestCase
+class UserControllerTest extends TestCase
 {
+    use RefreshDatabase;
+
     public function test_index_returns_users()
     {
+        User::factory()->count(3)->create();
+
         $response = $this->getJson('/api/users');
 
-        $this->assertApiResponse($response)
-            ->assertSuccess()
-            ->assertHasPagination()
-            ->assertFieldVisible('id')
-            ->assertFieldHidden('password')
-            ->assertStatus(200);
+        $response->assertStatus(200)
+            ->assertJsonStructure([
+                'success',
+                'message',
+                'data' => [['id', 'name', 'email', 'posts_count']],
+                'meta'
+            ]);
+    }
+
+    public function test_show_returns_single_user()
+    {
+        $user = User::factory()->create(['name' => 'John Doe']);
+
+        $response = $this->getJson("/api/users/{$user->id}");
+
+        $response->assertStatus(200)
+            ->assertJson([
+                'success' => true,
+                'data' => [
+                    'id' => $user->id,
+                    'name' => 'John Doe',
+                ]
+            ]);
     }
 }
 ```
@@ -377,7 +422,7 @@ class UserController extends BaseApiController
     )]
     public function show(User $user)
     {
-        return $this->success(UserDTO::from($user));
+        return $this->success($user);
     }
 
     #[ApiRequest(

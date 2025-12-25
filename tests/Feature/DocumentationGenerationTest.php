@@ -1,8 +1,11 @@
 <?php /** @noinspection PhpUnused */
 namespace FallegaHQ\ApiResponder\Tests\Feature;
 
+use FallegaHQ\ApiResponder\Attributes\ApiDeprecated;
 use FallegaHQ\ApiResponder\Attributes\ApiDescription;
+use FallegaHQ\ApiResponder\Attributes\ApiFileUpload;
 use FallegaHQ\ApiResponder\Attributes\ApiGroup;
+use FallegaHQ\ApiResponder\Attributes\ApiHidden;
 use FallegaHQ\ApiResponder\Attributes\ApiParam;
 use FallegaHQ\ApiResponder\Attributes\ApiResponse;
 use FallegaHQ\ApiResponder\Attributes\ApiTag;
@@ -13,6 +16,10 @@ use FallegaHQ\ApiResponder\DTO\BaseDTO;
 use FallegaHQ\ApiResponder\Http\Controllers\BaseApiController;
 use FallegaHQ\ApiResponder\Tests\TestCase;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Route;
 use ReflectionClass;
@@ -211,7 +218,6 @@ class DocumentationGenerationTest extends TestCase{
      * @throws \ReflectionException
      */
     public function test_custom_tags_override_path_based_tags(): void{
-        // Test that custom tags from attributes are extracted
         $command    = new GenerateDocumentationCommand();
         $reflection = new ReflectionClass($command);
         $method     = $reflection->getMethod('getAttributeTags');
@@ -221,7 +227,114 @@ class DocumentationGenerationTest extends TestCase{
         $tags       = $method->invoke($command, $route);
         $this->assertIsArray($tags);
         $this->assertContains('CustomTag', $tags);
-        $this->assertContains('TestDocs', $tags, 'Should also include class-level tags');
+        $this->assertContains('TestDocs', $tags);
+    }
+
+    /**
+     * @throws \ReflectionException
+     */
+    public function test_enum_detection_from_validation_rules(): void{
+        $command     = new GenerateDocumentationCommand();
+        $reflection  = new ReflectionClass($command);
+        $method      = $reflection->getMethod('detectEnumValues');
+        $requestInfo = [
+            'fields' => [
+                'status' => [
+                    'validation' => 'required|in:active,inactive,pending',
+                ],
+            ],
+        ];
+        $enumValues  = $method->invoke($command, 'status', $requestInfo);
+        $this->assertEquals(
+            [
+                'active',
+                'inactive',
+                'pending',
+            ],
+            $enumValues
+        );
+    }
+
+    /**
+     * @throws \ReflectionException
+     */
+    public function test_deprecation_info_extraction(): void{
+        $command    = new GenerateDocumentationCommand();
+        $reflection = new ReflectionClass($command);
+        $method     = $reflection->getMethod('getDeprecationInfo');
+        $route      = ['action' => TestDocController::class . '@deprecatedMethod'];
+        $info       = $method->invoke($command, $route);
+        $this->assertNotNull($info);
+        $this->assertTrue($info['deprecated']);
+        $this->assertEquals('Use newMethod instead', $info['reason']);
+        $this->assertEquals('v2.0', $info['since']);
+        $this->assertEquals('newMethod', $info['replacedBy']);
+    }
+
+    /**
+     * @throws \ReflectionException
+     */
+    public function test_file_upload_detection(): void{
+        $command    = new GenerateDocumentationCommand();
+        $reflection = new ReflectionClass($command);
+        $method     = $reflection->getMethod('hasFileUploads');
+        $route      = ['action' => TestDocController::class . '@uploadFile'];
+        $this->assertTrue($method->invoke($command, $route));
+    }
+
+    /**
+     * @throws \ReflectionException
+     */
+    public function test_file_upload_extraction(): void{
+        $command    = new GenerateDocumentationCommand();
+        $reflection = new ReflectionClass($command);
+        $method     = $reflection->getMethod('extractFileUploads');
+        $route      = ['action' => TestDocController::class . '@uploadFile'];
+        $files      = $method->invoke($command, $route);
+        $this->assertCount(1, $files);
+        $this->assertEquals('file', $files[0]['name']);
+        $this->assertEquals('Test file', $files[0]['description']);
+        $this->assertTrue($files[0]['required']);
+        $this->assertEquals(['image/jpeg'], $files[0]['allowedMimeTypes']);
+        $this->assertEquals(1024, $files[0]['maxSizeKb']);
+    }
+
+    /**
+     * @throws \ReflectionException
+     */
+    public function test_route_hidden_detection(): void{
+        Route::get(
+            'test-hidden',
+            [
+                HiddenTestController::class,
+                'hiddenMethod',
+            ]
+        );
+        $command    = new GenerateDocumentationCommand();
+        $reflection = new ReflectionClass($command);
+        $method     = $reflection->getMethod('isRouteHidden');
+        $routes     = Route::getRoutes();
+        foreach($routes as $route){
+            if($route->uri() === 'test-hidden'){
+                $this->assertTrue($method->invoke($command, $route));
+
+                return;
+            }
+        }
+        $this->fail('Hidden route not found');
+    }
+
+    /**
+     * @throws \ReflectionException
+     */
+    public function test_collection_relationship_detection(): void{
+        $command    = new GenerateDocumentationCommand();
+        $reflection = new ReflectionClass($command);
+        $method     = $reflection->getMethod('isCollectionRelationship');
+        $this->assertTrue($method->invoke($command, HasMany::class));
+        $this->assertTrue($method->invoke($command, BelongsToMany::class));
+        $this->assertFalse($method->invoke($command, BelongsTo::class));
+        $this->assertFalse($method->invoke($command, HasOne::class));
     }
 }
 
@@ -256,6 +369,23 @@ class TestDocController extends BaseApiController{
 
     #[ApiTag('CustomTag')]
     public function customTagged(): JsonResponse{
+        return $this->success([]);
+    }
+
+    #[ApiDeprecated(reason: 'Use newMethod instead', since: 'v2.0', replacedBy: 'newMethod')]
+    public function deprecatedMethod(): JsonResponse{
+        return $this->success([]);
+    }
+
+    #[ApiFileUpload(name: 'file', description: 'Test file', required: true, allowedMimeTypes: ['image/jpeg'], maxSizeKb: 1024)]
+    public function uploadFile(): JsonResponse{
+        return $this->success([]);
+    }
+}
+
+#[ApiHidden(reason: 'Internal testing')]
+class HiddenTestController extends BaseApiController{
+    public function hiddenMethod(): JsonResponse{
         return $this->success([]);
     }
 }

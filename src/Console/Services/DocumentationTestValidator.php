@@ -109,7 +109,7 @@ class DocumentationTestValidator{
         };
 
         return <<<PHP
-public function test_$testMethod()
+public function $testMethod()
 {
     \$response = \$this->$httpMethod('/$uri');
     

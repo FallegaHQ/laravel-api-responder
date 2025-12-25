@@ -29,6 +29,11 @@ visibility, and more.
 - 🧪 **Test Coverage Validation** - Verify documentation accuracy with test integration
 - 🔍 **Query Parameter Documentation** - Full validation rules (min, max, enum, format)
 - 🔐 **Security Schemes** - Bearer token authentication included automatically
+- 🎯 **Enum Support** - Auto-detects PHP enums and validation rules
+- 🔗 **Nested DTOs** - Automatic relationship detection with `$ref` schemas
+- 📎 **File Upload Documentation** - Multipart/form-data with constraints
+- ⚠️ **Deprecation Warnings** - Mark deprecated endpoints in OpenAPI spec
+- 🔍 **Route Filtering** - Include/exclude routes from public documentation
 
 ## Requirements
 
@@ -396,6 +401,10 @@ The package provides powerful attributes for documenting your API endpoints:
 | `#[ApiRequest]` | Method | Request body schema | `fields`, `description`, `dto` |
 | `#[ApiResponse]` | Method | Response schema | `model`, `type`, `description`, `statusCodes` |
 | `#[UseDto]` | Class | Link DTO to model | `dtoClass` |
+| `#[ApiDeprecated]` | Method/Class | Mark as deprecated | `reason`, `since`, `replacedBy` |
+| `#[ApiFileUpload]` | Method | Document file uploads | `name`, `description`, `required`, `allowedMimeTypes`, `maxSizeKb`, `multiple` |
+| `#[ApiHidden]` | Method/Class | Hide from documentation | `reason` |
+| `#[ApiEnum]` | Property/Parameter | Document enum values | `values`, `description` |
 
 ### Attribute Examples
 
@@ -443,6 +452,212 @@ public function login() { }
 class UserController extends BaseApiController { }
 ```
 
+#### `#[ApiDeprecated]` - Deprecation Warnings
+
+```php
+#[ApiDeprecated(
+    reason: 'Use the new v2 endpoint instead',
+    since: 'v2.0',
+    replacedBy: 'newEndpoint'
+)]
+public function oldEndpoint() { }
+```
+
+#### `#[ApiFileUpload]` - File Upload Documentation
+
+```php
+#[ApiFileUpload(
+    name: 'avatar',
+    description: 'User profile picture',
+    required: true,
+    allowedMimeTypes: ['image/jpeg', 'image/png'],
+    maxSizeKb: 2048,
+    multiple: false
+)]
+public function uploadAvatar(Request $request) { }
+```
+
+#### `#[ApiHidden]` - Hide Routes from Documentation
+
+```php
+// Hide entire controller
+#[ApiHidden(reason: 'Internal API')]
+class InternalController extends BaseApiController { }
+
+// Or hide specific method
+#[ApiHidden]
+public function debugEndpoint() { }
+```
+
+#### `#[ApiEnum]` - Document Enum Values
+
+```php
+use App\Enums\UserRole;
+
+// Enum values are auto-detected from:
+// 1. PHP 8.1+ enums with model casts
+class User extends Model {
+    protected function casts(): array {
+        return [
+            'role' => UserRole::class, // Auto-detected!
+        ];
+    }
+}
+
+// 2. Validation rules
+#[ApiRequest(fields: [
+    'status' => [
+        'type' => 'string',
+        'validation' => 'required|in:active,inactive,pending', // Auto-detected!
+    ],
+])]
+
+// 3. Explicit enum arrays
+#[ApiParam('role', 'string', 'User role', enum: ['admin', 'user', 'moderator'])]
+#[ApiRequest(fields: [
+    'role' => [
+        'type' => 'string',
+        'enum' => ['admin', 'user', 'moderator'], // Explicit
+    ],
+])]
+```
+
+## Enum Support
+
+The package **automatically detects and documents enum values** from multiple sources.
+
+### PHP 8.1+ Enums
+
+Create a backed enum:
+
+```php
+namespace App\Enums;
+
+enum UserRole: string {
+    case ADMIN = 'admin';
+    case USER = 'user';
+    case MODERATOR = 'moderator';
+}
+```
+
+Use it in your model:
+
+```php
+use App\Enums\UserRole;
+
+#[UseDto(UserDTO::class)]
+class User extends Model {
+    protected function casts(): array {
+        return [
+            'role' => UserRole::class, // Automatically detected!
+        ];
+    }
+}
+```
+
+Handle in your DTO:
+
+```php
+class UserDTO extends BaseDTO {
+    #[ComputedField(name: 'role')]
+    public function role(): string {
+        return $this->source->role?->value ?? UserRole::USER->value;
+    }
+    
+    #[ComputedField(name: 'is_admin')]
+    public function isAdmin(): bool {
+        return $this->source->role === UserRole::ADMIN;
+    }
+}
+```
+
+### Enum Detection in Documentation
+
+Enums are automatically detected from:
+
+1. **Model Casts** - PHP enums in `$casts` array
+2. **Validation Rules** - `in:value1,value2` rules
+3. **Explicit Arrays** - `enum` parameter in attributes
+
+All enum values appear as **dropdowns in Swagger UI and Postman**!
+
+## Nested DTOs and Relationships
+
+The package **automatically detects and includes Eloquent relationships** in your API responses when using DTOs.
+
+### Automatic Relationship Detection
+
+Simply add `#[UseDto]` to your models and eager load relationships:
+
+```php
+#[UseDto(UserDTO::class)]
+class User extends Model {
+    public function posts(): HasMany {
+        return $this->hasMany(Post::class);
+    }
+}
+
+#[UseDto(PostDTO::class)]
+class Post extends Model {
+    public function author(): BelongsTo {
+        return $this->belongsTo(User::class);
+    }
+}
+
+// In your controller
+public function show(User $user) {
+    // Eager load the relationship
+    $user->load('posts');
+    
+    // DTO automatically includes nested posts
+    return $this->success($user);
+}
+```
+
+### Configuration
+
+```php
+'nested_dtos' => [
+    // Automatically detect and include nested DTOs from relationships
+    'auto_detect_relationships' => true,
+    
+    // Include relationships even if not loaded (NOT RECOMMENDED - causes N+1)
+    'include_unloaded_relationships' => false,
+    
+    // Maximum depth for nested DTO resolution (prevents infinite loops)
+    'max_nesting_depth' => 3,
+],
+```
+
+**⚠️ Important:** Always eager load relationships to avoid N+1 query problems:
+
+```php
+// ✅ Good - Eager loaded
+$users = User::with(['posts', 'posts.comments'])->get();
+
+// ❌ Bad - Lazy loaded (causes N+1)
+$users = User::all(); // Don't do this if you need relationships
+```
+
+### OpenAPI Documentation
+
+Nested DTOs are automatically documented with proper `$ref` references:
+
+```json
+{
+  "UserDTO": {
+    "type": "object",
+    "properties": {
+      "posts": {
+        "type": "array",
+        "items": { "$ref": "#/components/schemas/PostDTO" },
+        "description": "Related PostDTO collection (only included when loaded)"
+      }
+    }
+  }
+}
+```
+
 ## Documentation
 
 - [Configuration Reference](config/api-responder.php) - All available configuration options
@@ -455,6 +670,11 @@ The package can automatically generate OpenAPI 3.0 documentation from your route
 - **Smart Grouping & Tagging** - Organizes endpoints by category with custom tags
 - **Human-Friendly Descriptions** - Document routes with intuitive attributes
 - **Testing Integration** - Validates documentation accuracy and test coverage
+- **Enum Support** - Auto-detects enums from validation rules and PHP enums
+- **Nested DTOs** - Automatically includes relationships with proper `$ref` schemas
+- **File Uploads** - Documents multipart/form-data with file constraints
+- **Deprecation Warnings** - Marks deprecated endpoints in OpenAPI spec
+- **Route Filtering** - Include/exclude routes from public documentation
 
 ### Generate Documentation
 
@@ -470,6 +690,12 @@ php artisan api:generate-docs --validate-tests
 
 # Show warnings for missing tests
 php artisan api:generate-docs --validate-tests --show-warnings
+
+# Filter routes (include/exclude patterns)
+php artisan api:generate-docs --include="api/public/*" --exclude="api/internal/*"
+
+# Filter by controllers
+php artisan api:generate-docs --include-controllers="*UserController" --exclude-controllers="*InternalController"
 ```
 
 ### Document Your API with Attributes

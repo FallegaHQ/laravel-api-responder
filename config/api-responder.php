@@ -220,6 +220,31 @@ return [
     ],
     /*
     |--------------------------------------------------------------------------
+    | Nested DTOs and Relationships
+    |--------------------------------------------------------------------------
+    | Configure how nested DTOs and Eloquent relationships are handled.
+    |
+    | WARNING: Including lazy-loaded relationships in API responses can cause
+    | N+1 query problems and severely impact performance. Always eager load
+    | relationships before transforming models to DTOs.
+    |
+    | Recommended: Set 'include_unloaded_relationships' to false and use
+    | eager loading: Model::with(['relation'])->get()
+    */
+    'nested_dtos'        => [
+        // Automatically detect and include nested DTOs from relationships
+        'auto_detect_relationships'      => true,
+        // Include relationships even if not loaded (NOT RECOMMENDED - causes N+1)
+        'include_unloaded_relationships' => false,
+        // Maximum depth for nested DTO resolution (prevents infinite loops)
+        'max_nesting_depth'              => 3,
+        // Cache nested DTO schemas for better performance
+        'cache_schemas'                  => true,
+        // Include relationship metadata in responses
+        'include_relationship_meta'      => false,
+    ],
+    /*
+    |--------------------------------------------------------------------------
     | Bindings - Configure custom implementations
     |--------------------------------------------------------------------------
     */

@@ -1,8 +1,12 @@
 <?php
 namespace FallegaHQ\ApiResponder\Console\Commands;
 
+use BackedEnum;
+use FallegaHQ\ApiResponder\Attributes\ApiDeprecated;
 use FallegaHQ\ApiResponder\Attributes\ApiDescription;
+use FallegaHQ\ApiResponder\Attributes\ApiFileUpload;
 use FallegaHQ\ApiResponder\Attributes\ApiGroup;
+use FallegaHQ\ApiResponder\Attributes\ApiHidden;
 use FallegaHQ\ApiResponder\Attributes\ApiParam;
 use FallegaHQ\ApiResponder\Attributes\ApiRequest;
 use FallegaHQ\ApiResponder\Attributes\ApiResponse;
@@ -11,15 +15,29 @@ use FallegaHQ\ApiResponder\Attributes\UseDto;
 use FallegaHQ\ApiResponder\Console\Services\DocumentationTestValidator;
 use FallegaHQ\ApiResponder\DTO\Attributes\ComputedField;
 use Illuminate\Console\Command;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasManyThrough;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
+use Illuminate\Database\Eloquent\Relations\MorphToMany;
+use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Routing\Route as RouteBase;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Route;
 use ReflectionClass;
 use ReflectionMethod;
 use Throwable;
+use UnitEnum;
 
 class GenerateDocumentationCommand extends Command{
-    protected                            $signature   = 'api:generate-docs {--output=api-docs.json} {--validate-tests : Validate test coverage} {--show-warnings : Show missing test warnings}';
+    protected                            $signature   = 'api:generate-docs 
+                            {--output=api-docs.json : Output file path}
+                            {--validate-tests : Validate test coverage}
+                            {--show-warnings : Show missing test warnings}
+                            {--include=* : Include only routes matching pattern (supports wildcards)}
+                            {--exclude=* : Exclude routes matching pattern (supports wildcards)}
+                            {--include-controllers=* : Include only specific controllers}
+                            {--exclude-controllers=* : Exclude specific controllers}';
     protected                            $description = 'Generate API documentation from routes and DTOs with authentication, grouping, and test validation';
     protected DocumentationTestValidator $testValidator;
 
@@ -57,6 +75,7 @@ class GenerateDocumentationCommand extends Command{
                     return str_starts_with($route->uri(), $apiPrefix . '/') || $route->uri() === $apiPrefix;
                 }
             )
+            ->filter(fn($route) => $this->shouldIncludeRoute($route))
             ->map(
                 fn($route) => [
                     'method' => implode('|', $route->methods()),
@@ -67,6 +86,114 @@ class GenerateDocumentationCommand extends Command{
             )
             ->values()
             ->toArray();
+    }
+
+    protected function shouldIncludeRoute($route): bool{
+        // Check ApiHidden attribute
+        if($this->isRouteHidden($route)){
+            return false;
+        }
+        $uri    = $route->uri();
+        $action = $route->getActionName();
+        // Check include patterns
+        $includePatterns = $this->option('include');
+        if(!empty($includePatterns)){
+            $matches = false;
+            foreach($includePatterns as $pattern){
+                if($this->matchesPattern($uri, $pattern)){
+                    $matches = true;
+                    break;
+                }
+            }
+            if(!$matches){
+                return false;
+            }
+        }
+        // Check exclude patterns
+        $excludePatterns = $this->option('exclude');
+        if(!empty($excludePatterns)){
+            foreach($excludePatterns as $pattern){
+                if($this->matchesPattern($uri, $pattern)){
+                    return false;
+                }
+            }
+        }
+        // Check controller filters
+        if(str_contains($action, '@')){
+            [$controller] = explode('@', $action);
+            $includeControllers = $this->option('include-controllers');
+            if(!empty($includeControllers)){
+                $matches = false;
+                foreach($includeControllers as $pattern){
+                    if($this->matchesPattern($controller, $pattern)){
+                        $matches = true;
+                        break;
+                    }
+                }
+                if(!$matches){
+                    return false;
+                }
+            }
+            $excludeControllers = $this->option('exclude-controllers');
+            if(!empty($excludeControllers)){
+                foreach($excludeControllers as $pattern){
+                    if($this->matchesPattern($controller, $pattern)){
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
+    protected function isRouteHidden($route): bool{
+        $action = $route->getActionName();
+        if(!str_contains($action, '@')){
+            return false;
+        }
+        [
+            $controller,
+            $method,
+        ] = explode('@', $action);
+        if(!class_exists($controller)){
+            return false;
+        }
+        try{
+            $reflection = new ReflectionClass($controller);
+            // Check class-level ApiHidden
+            if(!empty($reflection->getAttributes(ApiHidden::class))){
+                return true;
+            }
+            // Check method-level ApiHidden
+            if($reflection->hasMethod($method)){
+                $methodReflection = $reflection->getMethod($method);
+                if(!empty($methodReflection->getAttributes(ApiHidden::class))){
+                    return true;
+                }
+            }
+        }
+        catch(Throwable){
+            // Ignore
+        }
+
+        return false;
+    }
+
+    protected function matchesPattern(string $subject, string $pattern): bool{
+        $pattern = str_replace(
+            [
+                '*',
+                '?',
+            ],
+            [
+                '.*',
+                '.',
+            ],
+            $pattern
+        );
+
+        return (bool) preg_match('/^' . $pattern . '$/i', $subject);
     }
 
     protected function scanDtos(): Collection{
@@ -171,42 +298,66 @@ class GenerateDocumentationCommand extends Command{
     }
 
     protected function buildSchemas($dtos): array{
-        $schemas = [];
+        $schemas       = [];
+        $processedDtos = [];
         foreach($dtos as $dtoInfo){
-            $dtoClass = $dtoInfo['dto'];
-            if(!class_exists($dtoClass)){
-                continue;
-            }
-            $reflection = new ReflectionClass($dtoClass);
-            $schemaName = class_basename($dtoClass);
-            $properties = [];
-            // Get computed fields from DTO
-            foreach($reflection->getMethods(ReflectionMethod::IS_PUBLIC) as $method){
-                if(str_starts_with($method->getName(), '__') || $method->getDeclaringClass()
-                                                                       ->getName() !== $dtoClass){
-                    continue;
-                }
-                $attributes = $method->getAttributes(ComputedField::class);
-                if(!empty($attributes)){
-                    $computedAttr           = $attributes[0]->newInstance();
-                    $fieldName              = $computedAttr->name ?? $this->getFieldName($method->getName());
-                    $properties[$fieldName] = [
-                        'type'        => $this->inferType($method),
-                        'description' => 'Computed field from ' . $method->getName(),
-                    ];
-                }
-            }
-            // Add note about model attributes
-            $schemas[$schemaName] = [
-                'type'        => 'object',
-                'description' => 'DTO for ' . class_basename(
-                        $dtoInfo['model']
-                    ) . ' (includes all model attributes + computed fields)',
-                'properties'  => $properties,
-            ];
+            $this->buildDtoSchema($dtoInfo['dto'], $dtoInfo['model'], $schemas, $processedDtos);
         }
 
         return $schemas;
+    }
+
+    protected function buildDtoSchema(string  $dtoClass,
+                                      ?string $modelClass,
+                                      array   &$schemas,
+                                      array   &$processedDtos,
+                                      int     $depth = 0
+    ): void{
+        // Prevent infinite recursion
+        if($depth > 3 || in_array($dtoClass, $processedDtos, true)){
+            return;
+        }
+        if(!class_exists($dtoClass)){
+            return;
+        }
+        $processedDtos[] = $dtoClass;
+        $reflection      = new ReflectionClass($dtoClass);
+        $schemaName      = class_basename($dtoClass);
+        $properties      = [];
+        // Get computed fields from DTO
+        foreach($reflection->getMethods(ReflectionMethod::IS_PUBLIC) as $method){
+            if(str_starts_with($method->getName(), '__') || $method->getDeclaringClass()
+                                                                   ->getName() !== $dtoClass){
+                continue;
+            }
+            // Check for ComputedField attribute
+            $computedAttributes = $method->getAttributes(ComputedField::class);
+            if(!empty($computedAttributes)){
+                $computedAttr           = $computedAttributes[0]->newInstance();
+                $fieldName              = $computedAttr->name ?? $this->getFieldName($method->getName());
+                $properties[$fieldName] = [
+                    'type'        => $this->inferType($method),
+                    'description' => 'Computed field from ' . $method->getName(),
+                ];
+            }
+        }
+        // Auto-detect relationships from model if available
+        if($modelClass && class_exists($modelClass) && config(
+                'api-responder.nested_dtos.auto_detect_relationships',
+                true
+            )){
+            $relationshipProperties = $this->detectModelRelationships($modelClass, $schemas, $processedDtos, $depth);
+            $properties             = array_merge($properties, $relationshipProperties);
+        }
+        // Add note about model attributes
+        $description = $modelClass ? 'DTO for ' . class_basename(
+                $modelClass
+            ) . ' (includes all model attributes + computed fields)' : 'Data Transfer Object with computed fields';
+        $schemas[$schemaName] = [
+            'type'        => 'object',
+            'description' => $description,
+            'properties'  => $properties,
+        ];
     }
 
     protected function getFieldName(string $methodName): string{
@@ -233,6 +384,106 @@ class GenerateDocumentationCommand extends Command{
         };
     }
 
+    protected function detectModelRelationships(string $modelClass,
+                                                array  &$schemas,
+                                                array  &$processedDtos,
+                                                int    $depth
+    ): array{
+        $properties = [];
+        try{
+            $reflection = new ReflectionClass($modelClass);
+            foreach($reflection->getMethods(ReflectionMethod::IS_PUBLIC) as $method){
+                // Skip magic methods and inherited methods
+                if(str_starts_with($method->getName(), '__') || $method->getDeclaringClass()
+                                                                       ->getName() !== $modelClass){
+                    continue;
+                }
+                // Check if method returns a Relation
+                $returnType = $method->getReturnType();
+                if(!$returnType){
+                    continue;
+                }
+                $returnTypeName = $returnType->getName();
+                if(!is_subclass_of($returnTypeName, Relation::class)){
+                    continue;
+                }
+                $relationName = $method->getName();
+                // Try to find the related model's DTO
+                $relatedDto = $this->findRelatedModelDto($modelClass, $relationName);
+                if(!$relatedDto){
+                    continue;
+                }
+                $relatedSchemaName = class_basename($relatedDto);
+                // Recursively build related DTO schema
+                $this->buildDtoSchema($relatedDto, null, $schemas, $processedDtos, $depth + 1);
+                // Determine if it's a collection relationship
+                $isCollection = $this->isCollectionRelationship($returnTypeName);
+                if($isCollection){
+                    $properties[$relationName] = [
+                        'type'        => 'array',
+                        'items'       => ['$ref' => '#/components/schemas/' . $relatedSchemaName],
+                        'description' => 'Related ' . $relatedSchemaName . ' collection (only included when loaded)',
+                    ];
+                }
+                else{
+                    $properties[$relationName] = [
+                        'oneOf'       => [
+                            ['$ref' => '#/components/schemas/' . $relatedSchemaName],
+                            ['type' => 'null'],
+                        ],
+                        'description' => 'Related ' . $relatedSchemaName . ' (only included when loaded)',
+                    ];
+                }
+            }
+        }
+        catch(Throwable){
+            // Ignore errors
+        }
+
+        return $properties;
+    }
+
+    protected function findRelatedModelDto(string $modelClass, string $relationName): ?string{
+        try{
+            // Instantiate the model to get the relationship
+            $reflection = new ReflectionClass($modelClass);
+            $instance   = $reflection->newInstanceWithoutConstructor();
+            if(!method_exists($instance, $relationName)){
+                return null;
+            }
+            $relation     = $instance->$relationName();
+            $relatedModel = get_class($relation->getRelated());
+            // Check for UseDto attribute on related model
+            $relatedReflection = new ReflectionClass($relatedModel);
+            $attributes        = $relatedReflection->getAttributes(UseDto::class);
+            if(!empty($attributes)){
+                return $attributes[0]->newInstance()->dtoClass;
+            }
+        }
+        catch(Throwable){
+            // Ignore
+        }
+
+        return null;
+    }
+
+    protected function isCollectionRelationship(string $relationClass): bool{
+        $collectionRelations = [
+            HasMany::class,
+            BelongsToMany::class,
+            MorphMany::class,
+            MorphToMany::class,
+            HasManyThrough::class,
+        ];
+        foreach($collectionRelations as $collectionRelation){
+            if(is_a($relationClass, $collectionRelation, true)){
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /**
      * @throws \JsonException
      */
@@ -254,6 +505,24 @@ class GenerateDocumentationCommand extends Command{
                     'parameters'  => $this->extractParameters($path, $route),
                     'responses'   => $this->buildResponses($method, $schemas, $responseInfo),
                 ];
+                // Add deprecation info
+                $deprecationInfo = $this->getDeprecationInfo($route);
+                if($deprecationInfo){
+                    $operation['deprecated'] = true;
+                    if($deprecationInfo['reason'] || $deprecationInfo['since'] || $deprecationInfo['replacedBy']){
+                        $deprecationText = [];
+                        if($deprecationInfo['reason']){
+                            $deprecationText[] = $deprecationInfo['reason'];
+                        }
+                        if($deprecationInfo['since']){
+                            $deprecationText[] = 'Deprecated since: ' . $deprecationInfo['since'];
+                        }
+                        if($deprecationInfo['replacedBy']){
+                            $deprecationText[] = 'Use instead: ' . $deprecationInfo['replacedBy'];
+                        }
+                        $operation['description'] .= "\n\n**DEPRECATED:** " . implode('. ', $deprecationText);
+                    }
+                }
                 // Add security requirement if route is protected
                 if($this->isProtectedRoute($route)){
                     $operation['security'] = [['bearerAuth' => []]];
@@ -791,6 +1060,55 @@ class GenerateDocumentationCommand extends Command{
         return null;
     }
 
+    protected function getDeprecationInfo(array $route): ?array{
+        $action = $route['action'];
+        if(!str_contains($action, '@')){
+            return null;
+        }
+        [
+            $controller,
+            $method,
+        ] = explode('@', $action);
+        if(!class_exists($controller)){
+            return null;
+        }
+        try{
+            $reflection = new ReflectionClass($controller);
+            // Check method-level deprecation
+            if($reflection->hasMethod($method)){
+                $methodReflection = $reflection->getMethod($method);
+                $attributes       = $methodReflection->getAttributes(ApiDeprecated::class);
+                if(!empty($attributes)){
+                    $instance = $attributes[0]->newInstance();
+
+                    return [
+                        'deprecated' => true,
+                        'reason'     => $instance->reason,
+                        'since'      => $instance->since,
+                        'replacedBy' => $instance->replacedBy,
+                    ];
+                }
+            }
+            // Check class-level deprecation
+            $classAttributes = $reflection->getAttributes(ApiDeprecated::class);
+            if(!empty($classAttributes)){
+                $instance = $classAttributes[0]->newInstance();
+
+                return [
+                    'deprecated' => true,
+                    'reason'     => $instance->reason,
+                    'since'      => $instance->since,
+                    'replacedBy' => $instance->replacedBy,
+                ];
+            }
+        }
+        catch(Throwable){
+            // Ignore
+        }
+
+        return null;
+    }
+
     /**
      * @throws \JsonException
      */
@@ -799,6 +1117,9 @@ class GenerateDocumentationCommand extends Command{
                                         ?array $requestInfo = null,
                                         array  &$requestSchemas = []
     ): array{
+        // Check for file uploads
+        $fileUploads = $this->extractFileUploads($route);
+        $hasFiles    = !empty($fileUploads);
         $dataSchema = [
             'type'        => 'object',
             'description' => 'Request data',
@@ -822,6 +1143,7 @@ class GenerateDocumentationCommand extends Command{
                     $schemaName = 'Request' . md5(json_encode($requestInfo['fields'], JSON_THROW_ON_ERROR));
                 }
                 $properties = [];
+                $required   = [];
                 foreach($requestInfo['fields'] as $field => $config){
                     if(is_string($config)){
                         $properties[$config] = [
@@ -830,7 +1152,40 @@ class GenerateDocumentationCommand extends Command{
                         ];
                     }
                     else{
-                        $properties[$field] = $config;
+                        $fieldSchema = [
+                            'type'        => $config['type'] ?? 'string',
+                            'description' => $config['description'] ?? '',
+                        ];
+                        // Add enum values if present
+                        $enumValues = $this->detectEnumValues($field, $requestInfo);
+                        if($enumValues){
+                            $fieldSchema['enum'] = $enumValues;
+                        }
+                        if(isset($config['example'])){
+                            $fieldSchema['example'] = $config['example'];
+                        }
+                        if(isset($config['format'])){
+                            $fieldSchema['format'] = $config['format'];
+                        }
+                        if(isset($config['minimum'])){
+                            $fieldSchema['minimum'] = $config['minimum'];
+                        }
+                        if(isset($config['maximum'])){
+                            $fieldSchema['maximum'] = $config['maximum'];
+                        }
+                        if(isset($config['minLength'])){
+                            $fieldSchema['minLength'] = $config['minLength'];
+                        }
+                        if(isset($config['maxLength'])){
+                            $fieldSchema['maxLength'] = $config['maxLength'];
+                        }
+                        if(isset($config['pattern'])){
+                            $fieldSchema['pattern'] = $config['pattern'];
+                        }
+                        if(isset($config['required']) && $config['required']){
+                            $required[] = $field;
+                        }
+                        $properties[$field] = $fieldSchema;
                     }
                 }
                 // Store the schema definition
@@ -839,20 +1194,132 @@ class GenerateDocumentationCommand extends Command{
                     'properties'  => $properties,
                     'description' => $requestInfo['description'] ?? 'Request payload',
                 ];
-                $dataSchema                  = ['$ref' => '#/components/schemas/' . $schemaName];
+                if(!empty($required)){
+                    $requestSchemas[$schemaName]['required'] = $required;
+                }
+                $dataSchema = ['$ref' => '#/components/schemas/' . $schemaName];
             }
         }
         $description = $requestInfo['description'] ?? 'Request payload';
+        // Build content based on whether we have file uploads
+        $content = [];
+        if($hasFiles){
+            // Use multipart/form-data for file uploads
+            $multipartSchema = [
+                'type'       => 'object',
+                'properties' => [],
+            ];
+            // Add file upload fields
+            foreach($fileUploads as $file){
+                $fileSchema = [
+                    'type'        => 'string',
+                    'format'      => 'binary',
+                    'description' => $file['description'] ?? 'File upload',
+                ];
+                if($file['allowedMimeTypes']){
+                    $fileSchema['description'] .= ' (Allowed types: ' . implode(', ', $file['allowedMimeTypes']) . ')';
+                }
+                if($file['maxSizeKb']){
+                    $fileSchema['description'] .= ' (Max size: ' . $file['maxSizeKb'] . 'KB)';
+                }
+                if($file['multiple']){
+                    $multipartSchema['properties'][$file['name']] = [
+                        'type'  => 'array',
+                        'items' => $fileSchema,
+                    ];
+                }
+                else{
+                    $multipartSchema['properties'][$file['name']] = $fileSchema;
+                }
+                if($file['required']){
+                    if(!isset($multipartSchema['required'])){
+                        $multipartSchema['required'] = [];
+                    }
+                    $multipartSchema['required'][] = $file['name'];
+                }
+            }
+            // Add regular fields if present
+            if($requestInfo && !empty($requestInfo['fields'])){
+                foreach($requestInfo['fields'] as $field => $config){
+                    if(!is_string($config)){
+                        $multipartSchema['properties'][$field] = [
+                            'type'        => $config['type'] ?? 'string',
+                            'description' => $config['description'] ?? '',
+                        ];
+                    }
+                }
+            }
+            $content['multipart/form-data'] = [
+                'schema' => $multipartSchema,
+            ];
+        }
+        else{
+            $content['application/json'] = [
+                'schema' => $dataSchema,
+            ];
+        }
 
         return [
             'required'    => true,
             'description' => $description,
-            'content'     => [
-                'application/json' => [
-                    'schema' => $dataSchema,
-                ],
-            ],
+            'content'     => $content,
         ];
+    }
+
+    protected function extractFileUploads(array $route): array{
+        $action = $route['action'];
+        if(!str_contains($action, '@')){
+            return [];
+        }
+        [
+            $controller,
+            $method,
+        ] = explode('@', $action);
+        if(!class_exists($controller)){
+            return [];
+        }
+        try{
+            $reflection = new ReflectionClass($controller);
+            if($reflection->hasMethod($method)){
+                $methodReflection = $reflection->getMethod($method);
+                $attributes       = $methodReflection->getAttributes(ApiFileUpload::class);
+                $files            = [];
+                foreach($attributes as $attr){
+                    $instance = $attr->newInstance();
+                    $files[]  = [
+                        'name'             => $instance->name,
+                        'description'      => $instance->description,
+                        'required'         => $instance->required,
+                        'allowedMimeTypes' => $instance->allowedMimeTypes,
+                        'maxSizeKb'        => $instance->maxSizeKb,
+                        'multiple'         => $instance->multiple,
+                    ];
+                }
+
+                return $files;
+            }
+        }
+        catch(Throwable){
+            // Ignore
+        }
+
+        return [];
+    }
+
+    protected function detectEnumValues(string $fieldName, array $requestInfo = null): ?array{
+        // Check ApiEnum attribute first
+        if($requestInfo && isset($requestInfo['fields'][$fieldName]['enum'])){
+            return $requestInfo['fields'][$fieldName]['enum'];
+        }
+        // Try to detect from validation rules
+        if($requestInfo && isset($requestInfo['fields'][$fieldName]['validation'])){
+            $validation = $requestInfo['fields'][$fieldName]['validation'];
+            if(preg_match('/in:([^|]+)/', $validation, $matches)){
+                return explode(',', $matches[1]);
+            }
+        }
+
+        return null;
     }
 
     protected function buildTagsMetadata(array $routes): array{
@@ -881,6 +1348,8 @@ class GenerateDocumentationCommand extends Command{
 
         return $sortedTags;
     }
+
+    // ==================== ROUTE FILTERING ====================
 
     protected function getTagDescription(string $tag, array $route): string{
         // Check for ApiGroup attribute
@@ -1081,6 +1550,8 @@ class GenerateDocumentationCommand extends Command{
         ];
     }
 
+    // ==================== DEPRECATION SUPPORT ====================
+
     protected function buildErrorSchemas(): array{
         return [
             'ErrorResponse'   => [
@@ -1139,6 +1610,8 @@ class GenerateDocumentationCommand extends Command{
             ],
         ];
     }
+
+    // ==================== ENUM DETECTION ====================
 
     protected function buildGlobalResponses(): array{
         return [
@@ -1282,5 +1755,88 @@ class GenerateDocumentationCommand extends Command{
             }
         }
         $this->newLine();
+    }
+
+    protected function getModelCasts(string $modelClass): array{
+        if(!class_exists($modelClass)){
+            return [];
+        }
+        try{
+            $reflection = new ReflectionClass($modelClass);
+            // Try to get casts from casts() method (Laravel 11+)
+            if($reflection->hasMethod('casts')){
+                $method = $reflection->getMethod('casts');
+                if($method->isPublic()){
+                    $instance = $reflection->newInstanceWithoutConstructor();
+
+                    return $method->invoke($instance);
+                }
+            }
+            // Try to get from $casts property
+            if($reflection->hasProperty('casts')){
+                $property = $reflection->getProperty('casts');
+                $instance = $reflection->newInstanceWithoutConstructor();
+
+                return $property->getValue($instance) ?? [];
+            }
+        }
+        catch(Throwable){
+            // Ignore
+        }
+
+        return [];
+    }
+
+    // ==================== FILE UPLOAD SUPPORT ====================
+
+    protected function detectPhpEnum(string $type): ?array{
+        if(!class_exists($type)){
+            return null;
+        }
+        try{
+            $reflection = new ReflectionClass($type);
+            if($reflection->isEnum()){
+                $cases = [];
+                foreach($reflection->getConstants() as $case){
+                    if($case instanceof UnitEnum){
+                        $cases[] = $case instanceof BackedEnum ? $case->value : $case->name;
+                    }
+                }
+
+                return $cases;
+            }
+        }
+        catch(Throwable){
+            // Ignore
+        }
+
+        return null;
+    }
+
+    protected function hasFileUploads(array $route): bool{
+        $action = $route['action'];
+        if(!str_contains($action, '@')){
+            return false;
+        }
+        [
+            $controller,
+            $method,
+        ] = explode('@', $action);
+        if(!class_exists($controller)){
+            return false;
+        }
+        try{
+            $reflection = new ReflectionClass($controller);
+            if($reflection->hasMethod($method)){
+                $methodReflection = $reflection->getMethod($method);
+
+                return !empty($methodReflection->getAttributes(ApiFileUpload::class));
+            }
+        }
+        catch(Throwable){
+            // Ignore
+        }
+
+        return false;
     }
 }

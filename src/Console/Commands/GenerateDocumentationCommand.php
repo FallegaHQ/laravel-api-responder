@@ -738,7 +738,8 @@ class GenerateDocumentationCommand extends Command{
         if(!$routeObj){
             return false;
         }
-        $middleware = $routeObj->middleware();
+        // Use gatherMiddleware() to include middleware from parent groups
+        $middleware = $routeObj->gatherMiddleware();
         // Check for common auth middleware
         $authMiddleware = [
             'auth',

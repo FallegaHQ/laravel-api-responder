@@ -9,6 +9,7 @@ visibility, and more.
 
 ## Features
 
+### Core Features
 - 🎯 **Consistent API Responses** - Standardized JSON response structure
 - 🔄 **DTO Transformation** - Attribute-based data transformation with PHP 8.1+ attributes
 - 🔐 **Role-Based Visibility** - Control field visibility based on user roles
@@ -19,7 +20,15 @@ visibility, and more.
 - 🎨 **Exception Handling** - Unified exception handling for Laravel 10, 11, and 12
 - 📦 **Batch Operations** - Process multiple API requests in a single call
 - 🧪 **Testing Helpers** - Fluent assertion helpers for API testing
-- 📝 **Auto Documentation** - Generate OpenAPI documentation from routes
+
+### Advanced Documentation Generation
+- 📝 **OpenAPI 3.0 Generation** - Auto-generate complete API documentation
+- 🔒 **Authentication Awareness** - Automatically detect and mark protected routes
+- 🏷️ **Smart Tagging & Grouping** - Organize endpoints with custom tags and groups
+- 📖 **Human-Friendly Descriptions** - Document routes with intuitive attributes
+- 🧪 **Test Coverage Validation** - Verify documentation accuracy with test integration
+- 🔍 **Query Parameter Documentation** - Full validation rules (min, max, enum, format)
+- 🔐 **Security Schemes** - Bearer token authentication included automatically
 
 ## Requirements
 
@@ -226,7 +235,9 @@ class UserController extends BaseApiController
 ```json
 {
     "success": true,
-    "data": [...],
+    "data": [
+        "..."
+    ],
     "meta": {
         "current_page": 1,
         "last_page": 5,
@@ -372,13 +383,78 @@ class UserControllerTest extends TestCase
 }
 ```
 
+## Documentation Attributes Reference
+
+The package provides powerful attributes for documenting your API endpoints:
+
+| Attribute | Target | Purpose | Parameters |
+|-----------|--------|---------|------------|
+| `#[ApiDescription]` | Method | Custom summary and description | `summary`, `description`, `requiresAuth` |
+| `#[ApiParam]` | Method | Query parameter documentation | `name`, `type`, `description`, `required`, `example`, `minimum`, `maximum`, `enum`, `format` |
+| `#[ApiTag]` | Class/Method | Categorize endpoints | `tags` (string or array) |
+| `#[ApiGroup]` | Class/Method | Group with description | `name`, `description`, `priority` |
+| `#[ApiRequest]` | Method | Request body schema | `fields`, `description`, `dto` |
+| `#[ApiResponse]` | Method | Response schema | `model`, `type`, `description`, `statusCodes` |
+| `#[UseDto]` | Class | Link DTO to model | `dtoClass` |
+
+### Attribute Examples
+
+#### `#[ApiDescription]` - Endpoint Documentation
+
+```php
+#[ApiDescription(
+    summary: 'Create new post',
+    description: 'Creates a new blog post with validation',
+    requiresAuth: true  // Marks as protected in docs
+)]
+public function store(Request $request) { }
+```
+
+#### `#[ApiParam]` - Query Parameters (Repeatable)
+
+```php
+#[ApiParam('page', 'integer', 'Page number', required: false, example: 1, minimum: 1)]
+#[ApiParam('per_page', 'integer', 'Items per page', minimum: 1, maximum: 100)]
+#[ApiParam('status', 'string', 'Filter by status', enum: ['active', 'inactive'])]
+#[ApiParam('search', 'string', 'Search term', required: false)]
+public function index() { }
+```
+
+#### `#[ApiTag]` - Categorization
+
+```php
+// Class-level (applies to all methods)
+#[ApiTag(['Users', 'Management'])]
+class UserController extends BaseApiController { }
+
+// Method-level (additional tags)
+#[ApiTag('Auth')]
+public function login() { }
+```
+
+#### `#[ApiGroup]` - Grouping with Description
+
+```php
+#[ApiGroup(
+    name: 'User Management',
+    description: 'Endpoints for managing user accounts and profiles',
+    priority: 1  // Controls display order
+)]
+class UserController extends BaseApiController { }
+```
+
 ## Documentation
 
 - [Configuration Reference](config/api-responder.php) - All available configuration options
 
 ## OpenAPI Documentation Generation
 
-The package can automatically generate OpenAPI 3.0 documentation from your routes, DTOs, and attributes.
+The package can automatically generate OpenAPI 3.0 documentation from your routes, DTOs, and attributes with advanced features:
+
+- **Authentication Awareness** - Automatically detects and marks protected routes
+- **Smart Grouping & Tagging** - Organizes endpoints by category with custom tags
+- **Human-Friendly Descriptions** - Document routes with intuitive attributes
+- **Testing Integration** - Validates documentation accuracy and test coverage
 
 ### Generate Documentation
 
@@ -388,6 +464,12 @@ php artisan api:generate-docs
 
 # Custom output file
 php artisan api:generate-docs --output=openapi.json
+
+# Validate test coverage
+php artisan api:generate-docs --validate-tests
+
+# Show warnings for missing tests
+php artisan api:generate-docs --validate-tests --show-warnings
 ```
 
 ### Document Your API with Attributes
@@ -395,7 +477,10 @@ php artisan api:generate-docs --output=openapi.json
 Use attributes to enrich your generated documentation:
 
 ```php
-use FallegaHQ\ApiResponder\Attributes\{ApiRequest, ApiResponse, UseDto};
+use FallegaHQ\ApiResponder\Attributes\{
+    ApiDescription, ApiParam, ApiTag, ApiGroup,
+    ApiRequest, ApiResponse, UseDto
+};
 
 #[UseDto(UserDTO::class)]
 class User extends Model
@@ -403,8 +488,18 @@ class User extends Model
     // Model definition
 }
 
+#[ApiTag(['Users', 'Management'])]
+#[ApiGroup('Users', 'User management and profile operations')]
 class UserController extends BaseApiController
 {
+    #[ApiDescription(
+        summary: 'List all users',
+        description: 'Retrieves a paginated list of all users in the system',
+        requiresAuth: true
+    )]
+    #[ApiParam('page', 'integer', 'Page number', required: false, example: 1)]
+    #[ApiParam('per_page', 'integer', 'Items per page', required: false, minimum: 1, maximum: 100)]
+    #[ApiParam('search', 'string', 'Search by name or email', required: false)]
     #[ApiResponse(
         model: User::class,
         type: 'paginated',
@@ -415,6 +510,11 @@ class UserController extends BaseApiController
         return $this->success(User::paginate());
     }
 
+    #[ApiDescription(
+        summary: 'Get user details',
+        description: 'Retrieves detailed information about a specific user',
+        requiresAuth: true
+    )]
     #[ApiResponse(
         model: User::class,
         type: 'single',
@@ -425,6 +525,10 @@ class UserController extends BaseApiController
         return $this->success($user);
     }
 
+    #[ApiDescription(
+        summary: 'Create new user',
+        description: 'Creates a new user account with the provided information'
+    )]
     #[ApiRequest(
         fields: [
             'name' => ['type' => 'string', 'description' => 'User name', 'example' => 'John Doe'],
@@ -434,6 +538,7 @@ class UserController extends BaseApiController
         description: 'Create a new user'
     )]
     #[ApiResponse(model: User::class, type: 'single')]
+    #[ApiTag('Auth')]
     public function store(Request $request)
     {
         // Implementation
@@ -441,22 +546,136 @@ class UserController extends BaseApiController
 }
 ```
 
+### Available Documentation Attributes
+
+#### `#[ApiDescription]`
+Provides human-friendly summary and description for endpoints:
+
+```php
+#[ApiDescription(
+    summary: 'Short summary of the endpoint',
+    description: 'Detailed description with markdown support',
+    requiresAuth: true  // Marks endpoint as protected
+)]
+```
+
+#### `#[ApiParam]`
+Documents query parameters (repeatable):
+
+```php
+#[ApiParam(
+    name: 'filter',
+    type: 'string',
+    description: 'Filter results',
+    required: false,
+    example: 'active',
+    enum: ['active', 'inactive', 'pending']
+)]
+#[ApiParam('page', 'integer', 'Page number', minimum: 1)]
+```
+
+#### `#[ApiTag]`
+Organizes endpoints into categories (repeatable, can be used on class or method):
+
+```php
+#[ApiTag('Users')]  // Single tag
+#[ApiTag(['Users', 'Admin'])]  // Multiple tags
+```
+
+#### `#[ApiGroup]`
+Groups related endpoints with descriptions (can be used on class or method):
+
+```php
+#[ApiGroup(
+    name: 'User Management',
+    description: 'Endpoints for managing user accounts and profiles',
+    priority: 1  // Controls display order
+)]
+```
+
 ### Generated Documentation Features
 
 The generated OpenAPI documentation includes:
 
+- **Authentication Detection** - Automatically identifies protected routes via middleware or attributes
+- **Security Schemes** - Bearer token authentication schema included
 - **Request Schemas** - All request bodies are stored as reusable components in `components/schemas`
 - **Response Schemas** - DTOs with computed fields are fully documented
-- **URL Parameters** - Path parameters are automatically extracted
-- **Validation Rules** - Field types, formats, minimums, enums, etc.
-- **Descriptions** - Custom descriptions from attributes
+- **URL Parameters** - Path and query parameters with full validation rules
+- **Validation Rules** - Field types, formats, minimums, maximums, enums, etc.
+- **Descriptions** - Custom descriptions from attributes with markdown support
 - **Pagination** - Paginated responses include links and metadata schemas
 - **Error Responses** - Standard error response schemas
+- **Smart Tagging** - Organized by category with 'Auth' tag for protected endpoints
+- **Test Coverage** - Validates that routes have corresponding tests
+
+### Testing Integration
+
+The documentation generator can validate your test coverage:
+
+```bash
+php artisan api:generate-docs --validate-tests --show-warnings
+```
+
+**Output:**
+```
+Test Coverage Analysis:
+
+Total Routes: 15
+Tested Routes: 12
+Coverage: 80%
+
+Routes Missing Tests:
+  • GET /api/users/{user}/posts
+    Add test: $this->getJson('/api/users/{user}/posts')
+  • DELETE /api/posts/{post}
+    Add test: $this->deleteJson('/api/posts/{post}')
+```
+
+The validator:
+- Scans your `tests/Feature` and `tests/Unit` directories
+- Checks if route URIs or names appear in test files
+- Provides actionable recommendations for missing tests
+- Calculates overall test coverage percentage
 
 ### Example Generated Schema
 
 ```json
 {
+  "openapi": "3.0.0",
+  "info": {
+    "title": "My API",
+    "version": "v1"
+  },
+  "tags": [
+    {
+      "name": "Auth",
+      "description": "Authentication and authorization endpoints"
+    },
+    {
+      "name": "Users",
+      "description": "User management endpoints"
+    }
+  ],
+  "paths": {
+    "/api/users": {
+      "get": {
+        "summary": "List all users",
+        "description": "Retrieves a paginated list of all users in the system\n\n**Authentication Required:** Yes",
+        "tags": ["Users", "Auth"],
+        "security": [{"bearerAuth": []}],
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {"type": "integer"},
+            "example": 1
+          }
+        ]
+      }
+    }
+  },
   "components": {
     "schemas": {
       "UserDTO": {
@@ -471,22 +690,14 @@ The generated OpenAPI documentation includes:
             "description": "Computed field from postsCount"
           }
         }
-      },
-      "UserControllerStoreRequest": {
-        "type": "object",
-        "description": "Create a new user",
-        "properties": {
-          "name": {
-            "type": "string",
-            "description": "User name",
-            "example": "John Doe"
-          },
-          "email": {
-            "type": "string",
-            "format": "email",
-            "description": "User email"
-          }
-        }
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Enter your bearer token in the format: Bearer {token}"
       }
     }
   }
@@ -565,5 +776,8 @@ This package is open-sourced software licensed under the [MIT license](LICENSE.m
 
 ## Support
 
-For issues, questions, or contributions, please visit
-the [GitHub repository](https://github.com/fallegahq/laravel-api-responder).
+For issues, questions, or contributions:
+
+- 📖 [Documentation](README.md)
+- 🐛 [GitHub Issues](https://github.com/fallegahq/laravel-api-responder/issues)
+- 📦 [GitHub Repository](https://github.com/fallegahq/laravel-api-responder)

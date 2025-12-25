@@ -1,11 +1,17 @@
 <?php
 namespace FallegaHQ\ApiResponder\Console\Commands;
 
+use FallegaHQ\ApiResponder\Attributes\ApiDescription;
+use FallegaHQ\ApiResponder\Attributes\ApiGroup;
+use FallegaHQ\ApiResponder\Attributes\ApiParam;
 use FallegaHQ\ApiResponder\Attributes\ApiRequest;
 use FallegaHQ\ApiResponder\Attributes\ApiResponse;
+use FallegaHQ\ApiResponder\Attributes\ApiTag;
 use FallegaHQ\ApiResponder\Attributes\UseDto;
+use FallegaHQ\ApiResponder\Console\Services\DocumentationTestValidator;
 use FallegaHQ\ApiResponder\DTO\Attributes\ComputedField;
 use Illuminate\Console\Command;
+use Illuminate\Routing\Route as RouteBase;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Route;
 use ReflectionClass;
@@ -13,14 +19,18 @@ use ReflectionMethod;
 use Throwable;
 
 class GenerateDocumentationCommand extends Command{
-    protected $signature   = 'api:generate-docs {--output=api-docs.json}';
-    protected $description = 'Generate API documentation from routes and DTOs';
+    protected                            $signature   = 'api:generate-docs {--output=api-docs.json} {--validate-tests : Validate test coverage} {--show-warnings : Show missing test warnings}';
+    protected                            $description = 'Generate API documentation from routes and DTOs with authentication, grouping, and test validation';
+    protected DocumentationTestValidator $testValidator;
 
     /**
      * @throws \JsonException
      */
     public function handle(): void{
         $this->info('Scanning routes and DTOs...');
+        if($this->option('validate-tests')){
+            $this->testValidator = new DocumentationTestValidator();
+        }
         $routes        = $this->getApiRoutes();
         $dtos          = $this->scanDtos();
         $documentation = $this->buildDocumentation($routes, $dtos);
@@ -28,6 +38,9 @@ class GenerateDocumentationCommand extends Command{
         file_put_contents($outputPath, json_encode($documentation, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT));
         $this->info("API documentation generated: $outputPath");
         $this->info("Found " . count($routes) . " routes and {$dtos->count()} DTOs");
+        if($this->option('validate-tests')){
+            $this->displayTestValidation($routes);
+        }
     }
 
     protected function getApiRoutes(){
@@ -100,30 +113,59 @@ class GenerateDocumentationCommand extends Command{
         return $dtos;
     }
 
+    /**
+     * @throws \JsonException
+     */
     protected function buildDocumentation($routes, $dtos): array{
         $schemas        = $this->buildSchemas($dtos);
         $requestSchemas = [];
         $paths          = $this->buildPaths($routes, $schemas, $requestSchemas);
+        $tags           = $this->buildTagsMetadata($routes);
 
         return [
-            'openapi'    => '3.0.0',
-            'info'       => [
+            'openapi'             => '3.0.0',
+            'info'                => [
                 'title'       => config('app.name') . ' API',
                 'version'     => config('api-responder.metadata.api_version'),
                 'description' => $this->buildDescription(),
             ],
-            'servers'    => [
-                ['url' => config('app.url')],
+            'servers'             => [
+                [
+                    'url'       => config('app.url'),
+                    'variables' => [
+                        'bearerToken' => [
+                            'default'     => 'your-token-here',
+                            'description' => 'Bearer authentication token',
+                        ],
+                    ],
+                ],
             ],
-            'paths'      => $paths,
-            'components' => [
-                'schemas'   => array_merge(
+            'tags'                => $tags,
+            'paths'               => $paths,
+            'components'          => [
+                'schemas'         => array_merge(
                     $schemas,
                     $requestSchemas,
                     $this->buildResponseShapes(),
                     $this->buildErrorSchemas()
                 ),
-                'responses' => $this->buildGlobalResponses(),
+                'responses'       => $this->buildGlobalResponses(),
+                'securitySchemes' => [
+                    'bearerAuth' => [
+                        'type'         => 'http',
+                        'scheme'       => 'bearer',
+                        'bearerFormat' => 'JWT',
+                        'description'  => 'Enter your bearer token in the format: Bearer {token}',
+                    ],
+                ],
+            ],
+            'x-postman-variables' => [
+                [
+                    'key'         => 'bearerToken',
+                    'value'       => '',
+                    'type'        => 'string',
+                    'description' => 'Bearer authentication token for protected endpoints',
+                ],
             ],
         ];
     }
@@ -191,6 +233,9 @@ class GenerateDocumentationCommand extends Command{
         };
     }
 
+    /**
+     * @throws \JsonException
+     */
     protected function buildPaths(array $routes, array $schemas, array &$requestSchemas): array{
         $paths = [];
         foreach($routes as $route){
@@ -205,10 +250,14 @@ class GenerateDocumentationCommand extends Command{
                 $operation = [
                     'summary'     => $this->generateSummary($route, $method),
                     'description' => $this->generateDescription($route, $method, $responseInfo),
-                    'tags'        => $this->extractTags($path),
-                    'parameters'  => $this->extractParameters($path),
+                    'tags'        => $this->extractTags($path, $route),
+                    'parameters'  => $this->extractParameters($path, $route),
                     'responses'   => $this->buildResponses($method, $schemas, $responseInfo),
                 ];
+                // Add security requirement if route is protected
+                if($this->isProtectedRoute($route)){
+                    $operation['security'] = [['bearerAuth' => []]];
+                }
                 if(in_array(
                     $method,
                     [
@@ -262,7 +311,7 @@ class GenerateDocumentationCommand extends Command{
                 'statusCodes' => $apiResponse->statusCodes,
             ];
         }
-        catch(Throwable $e){
+        catch(Throwable){
             return null;
         }
     }
@@ -294,12 +343,36 @@ class GenerateDocumentationCommand extends Command{
                 'fields'      => $apiRequest->fields,
             ];
         }
-        catch(Throwable $e){
+        catch(Throwable){
             return null;
         }
     }
 
     protected function generateSummary(array $route, string $method): string{
+        // Check for ApiDescription attribute first
+        $action = $route['action'];
+        if(str_contains($action, '@')){
+            [
+                $controller,
+                $methodName,
+            ] = explode('@', $action);
+            if(class_exists($controller)){
+                try{
+                    $reflection = new ReflectionClass($controller);
+                    if($reflection->hasMethod($methodName)){
+                        $methodReflection = $reflection->getMethod($methodName);
+                        $attributes       = $methodReflection->getAttributes(ApiDescription::class);
+                        if(!empty($attributes)){
+                            return $attributes[0]->newInstance()->summary;
+                        }
+                    }
+                }
+                catch(Throwable){
+                    // Continue to fallback
+                }
+            }
+        }
+        // Fallback to route name or generated summary
         if($route['name']){
             return ucfirst(
                 str_replace(
@@ -312,7 +385,7 @@ class GenerateDocumentationCommand extends Command{
                 )
             );
         }
-        $action = match ($method) {
+        $actionVerb = match ($method) {
             'get'          => 'Retrieve',
             'post'         => 'Create',
             'put', 'patch' => 'Update',
@@ -320,10 +393,42 @@ class GenerateDocumentationCommand extends Command{
             default        => 'Handle',
         };
 
-        return $action . ' ' . $route['uri'];
+        return $actionVerb . ' ' . $route['uri'];
     }
 
     protected function generateDescription(array $route, string $method, ?array $responseInfo = null): string{
+        // Check for ApiDescription attribute first
+        $action = $route['action'];
+        if(str_contains($action, '@')){
+            [
+                $controller,
+                $methodName,
+            ] = explode('@', $action);
+            if(class_exists($controller)){
+                try{
+                    $reflection = new ReflectionClass($controller);
+                    if($reflection->hasMethod($methodName)){
+                        $methodReflection = $reflection->getMethod($methodName);
+                        $attributes       = $methodReflection->getAttributes(ApiDescription::class);
+                        if(!empty($attributes)){
+                            $instance = $attributes[0]->newInstance();
+                            if($instance->description){
+                                $desc = $instance->description;
+                                if($instance->requiresAuth){
+                                    $desc .= "\n\n**Authentication Required:** Yes";
+                                }
+
+                                return $desc;
+                            }
+                        }
+                    }
+                }
+                catch(Throwable){
+                    // Continue to fallback
+                }
+            }
+        }
+        // Fallback to default descriptions
         $descriptions    = [
             'get'    => 'Retrieves resource(s). Returns data wrapped in success response with metadata.',
             'post'   => 'Creates a new resource. Returns created resource with 201 status.',
@@ -332,6 +437,10 @@ class GenerateDocumentationCommand extends Command{
             'delete' => 'Deletes a resource. Returns 204 No Content on success.',
         ];
         $baseDescription = $descriptions[$method] ?? 'Handles the request.';
+        // Add authentication info
+        if($this->isProtectedRoute($route)){
+            $baseDescription .= "\n\n**Authentication Required:** Yes";
+        }
         if($responseInfo){
             $modelName       = $responseInfo['model'] ? class_basename($responseInfo['model']) : 'resource';
             $typeDescription = match ($responseInfo['type']) {
@@ -349,14 +458,133 @@ class GenerateDocumentationCommand extends Command{
         return $baseDescription;
     }
 
-    protected function extractTags(string $path): array{
-        $parts = explode('/', trim($path, '/'));
+    protected function isProtectedRoute(array $route): bool{
+        // Check middleware for auth
+        /** @var RouteBase|null $routeObj */
+        $routeObj = collect(Route::getRoutes())->first(
+            function($r) use ($route){
+                return $r->uri() === $route['uri'] && in_array(strtoupper($route['method']), $r->methods(), true);
+            }
+        );
+        if(!$routeObj){
+            return false;
+        }
+        $middleware = $routeObj->middleware();
+        // Check for common auth middleware
+        $authMiddleware = [
+            'auth',
+            'auth:api',
+            'auth:sanctum',
+            'auth.basic',
+            'can',
+        ];
+        foreach($authMiddleware as $auth){
+            if(in_array($auth, $middleware, true) || $this->middlewareContains($middleware, $auth)){
+                return true;
+            }
+        }
+        // Check ApiDescription attribute
+        $action = $route['action'];
+        if(str_contains($action, '@')){
+            [
+                $controller,
+                $method,
+            ] = explode('@', $action);
+            if(class_exists($controller)){
+                try{
+                    $reflection = new ReflectionClass($controller);
+                    if($reflection->hasMethod($method)){
+                        $methodReflection = $reflection->getMethod($method);
+                        $attributes       = $methodReflection->getAttributes(ApiDescription::class);
+                        if(!empty($attributes)){
+                            return $attributes[0]->newInstance()->requiresAuth;
+                        }
+                    }
+                }
+                catch(Throwable){
+                    // Ignore
+                }
+            }
+        }
 
-        return !empty($parts[1]) ? [ucfirst($parts[1])] : ['API'];
+        return false;
     }
 
-    protected function extractParameters(string $path): array{
+    protected function middlewareContains(array $middleware, string $search): bool{
+        foreach($middleware as $mw){
+            if(is_string($mw) && str_starts_with($mw, $search)){
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    protected function extractTags(string $path, array $route): array{
+        $tags = [];
+        // Check for ApiTag attribute on controller method
+        $attributeTags = $this->getAttributeTags($route);
+        if(!empty($attributeTags)){
+            $tags = array_merge($tags, $attributeTags);
+        }
+        // Fallback to path-based tags
+        if(empty($tags)){
+            $parts = explode('/', trim($path, '/'));
+            $tags  = !empty($parts[1]) ? [ucfirst($parts[1])] : ['API'];
+        }
+        // Add authentication tag if route is protected
+        if($this->isProtectedRoute($route)){
+            $tags[] = 'Auth';
+        }
+
+        return array_unique($tags);
+    }
+
+    protected function getAttributeTags(array $route): array{
+        $action = $route['action'];
+        if(!str_contains($action, '@')){
+            return [];
+        }
+        [
+            $controller,
+            $method,
+        ] = explode('@', $action);
+        if(!class_exists($controller)){
+            return [];
+        }
+        try{
+            $reflection = new ReflectionClass($controller);
+            $tags       = [];
+            // Check class-level tags
+            $classAttributes = $reflection->getAttributes(ApiTag::class);
+            foreach($classAttributes as $attr){
+                $instance = $attr->newInstance();
+                foreach($instance->tags as $tag){
+                    $tags[] = $tag;
+                }
+            }
+            // Check method-level tags
+            if($reflection->hasMethod($method)){
+                $methodReflection = $reflection->getMethod($method);
+                $methodAttributes = $methodReflection->getAttributes(ApiTag::class);
+                foreach($methodAttributes as $attr){
+                    $instance = $attr->newInstance();
+                    foreach($instance->tags as $tag){
+                        $tags[] = $tag;
+                    }
+                }
+            }
+
+            return array_unique($tags);
+        }
+        catch(Throwable){
+            return [];
+        }
+    }
+
+    protected function extractParameters(string $path, array $route): array{
         $parameters = [];
+        // Extract path parameters
         preg_match_all('/\{([^}]+)}/', $path, $matches);
         foreach($matches[1] as $param){
             $parameters[] = [
@@ -366,6 +594,52 @@ class GenerateDocumentationCommand extends Command{
                 'schema'      => ['type' => 'string'],
                 'description' => 'The ' . $param . ' identifier',
             ];
+        }
+        // Extract ApiParam attributes
+        $action = $route['action'];
+        if(str_contains($action, '@')){
+            [
+                $controller,
+                $method,
+            ] = explode('@', $action);
+            if(class_exists($controller)){
+                try{
+                    $reflection = new ReflectionClass($controller);
+                    if($reflection->hasMethod($method)){
+                        $methodReflection = $reflection->getMethod($method);
+                        $attributes       = $methodReflection->getAttributes(ApiParam::class);
+                        foreach($attributes as $attr){
+                            $instance = $attr->newInstance();
+                            $paramDef = [
+                                'name'        => $instance->name,
+                                'in'          => 'query',
+                                'required'    => $instance->required,
+                                'schema'      => ['type' => $instance->type],
+                                'description' => $instance->description ?? '',
+                            ];
+                            if($instance->format){
+                                $paramDef['schema']['format'] = $instance->format;
+                            }
+                            if($instance->minimum !== null){
+                                $paramDef['schema']['minimum'] = $instance->minimum;
+                            }
+                            if($instance->maximum !== null){
+                                $paramDef['schema']['maximum'] = $instance->maximum;
+                            }
+                            if($instance->enum !== null){
+                                $paramDef['schema']['enum'] = $instance->enum;
+                            }
+                            if($instance->example !== null){
+                                $paramDef['example'] = $instance->example;
+                            }
+                            $parameters[] = $paramDef;
+                        }
+                    }
+                }
+                catch(Throwable){
+                    // Ignore
+                }
+            }
         }
 
         return $parameters;
@@ -475,7 +749,6 @@ class GenerateDocumentationCommand extends Command{
                 ],
             ];
         }
-
         $responses = [
             '200' => [
                 'description' => 'Successful response',
@@ -486,7 +759,6 @@ class GenerateDocumentationCommand extends Command{
                 ],
             ],
         ];
-        
         if($method === 'post'){
             $responses['201'] = [
                 'description' => 'Resource created successfully',
@@ -512,13 +784,16 @@ class GenerateDocumentationCommand extends Command{
                 return $attributes[0]->newInstance()->dtoClass;
             }
         }
-        catch(Throwable $e){
+        catch(Throwable){
             // Ignore
         }
 
         return null;
     }
 
+    /**
+     * @throws \JsonException
+     */
     protected function buildRequestBody(array  $route,
                                         array  $schemas,
                                         ?array $requestInfo = null,
@@ -544,7 +819,7 @@ class GenerateDocumentationCommand extends Command{
                     $schemaName = class_basename($controller) . ucfirst($method) . 'Request';
                 }
                 else{
-                    $schemaName = 'Request' . md5(json_encode($requestInfo['fields']));
+                    $schemaName = 'Request' . md5(json_encode($requestInfo['fields'], JSON_THROW_ON_ERROR));
                 }
                 $properties = [];
                 foreach($requestInfo['fields'] as $field => $config){
@@ -578,6 +853,79 @@ class GenerateDocumentationCommand extends Command{
                 ],
             ],
         ];
+    }
+
+    protected function buildTagsMetadata(array $routes): array{
+        $tagsMap = [];
+        foreach($routes as $route){
+            $tags = $this->extractTags('/' . $route['uri'], $route);
+            foreach($tags as $tag){
+                if(!isset($tagsMap[$tag])){
+                    $tagsMap[$tag] = [
+                        'name'        => $tag,
+                        'description' => $this->getTagDescription($tag, $route),
+                    ];
+                }
+            }
+        }
+        // Sort tags: Auth first, then alphabetically
+        $sortedTags = [];
+        if(isset($tagsMap['Auth'])){
+            $sortedTags[] = $tagsMap['Auth'];
+            unset($tagsMap['Auth']);
+        }
+        ksort($tagsMap);
+        foreach($tagsMap as $tag){
+            $sortedTags[] = $tag;
+        }
+
+        return $sortedTags;
+    }
+
+    protected function getTagDescription(string $tag, array $route): string{
+        // Check for ApiGroup attribute
+        $action = $route['action'];
+        if(str_contains($action, '@')){
+            [
+                $controller,
+                $method,
+            ] = explode('@', $action);
+            if(class_exists($controller)){
+                try{
+                    $reflection = new ReflectionClass($controller);
+                    // Check class-level group
+                    $classAttributes = $reflection->getAttributes(ApiGroup::class);
+                    foreach($classAttributes as $attr){
+                        $instance = $attr->newInstance();
+                        if($instance->name === $tag && $instance->description){
+                            return $instance->description;
+                        }
+                    }
+                    // Check method-level group
+                    if($reflection->hasMethod($method)){
+                        $methodReflection = $reflection->getMethod($method);
+                        $methodAttributes = $methodReflection->getAttributes(ApiGroup::class);
+                        foreach($methodAttributes as $attr){
+                            $instance = $attr->newInstance();
+                            if($instance->name === $tag && $instance->description){
+                                return $instance->description;
+                            }
+                        }
+                    }
+                }
+                catch(Throwable){
+                    // Ignore
+                }
+            }
+        }
+
+        // Default descriptions
+        return match ($tag) {
+            'Auth'  => 'Authentication and authorization endpoints',
+            'Users' => 'User management endpoints',
+            'API'   => 'General API endpoints',
+            default => ucfirst($tag) . ' related endpoints',
+        };
     }
 
     protected function buildDescription(): string{
@@ -632,6 +980,12 @@ class GenerateDocumentationCommand extends Command{
                 '  "errors": {...},',
                 '  "meta": {...}',
                 '}',
+                '```',
+                '',
+                '## Authentication',
+                'Protected endpoints require a Bearer token in the Authorization header:',
+                '```',
+                'Authorization: Bearer {your-token}',
                 '```',
             ]
         );
@@ -894,5 +1248,39 @@ class GenerateDocumentationCommand extends Command{
                 ],
             ],
         ];
+    }
+
+    protected function displayTestValidation(array $routes): void{
+        $this->newLine();
+        $this->info('Test Coverage Analysis:');
+        $this->newLine();
+        $totalRoutes  = count($routes);
+        $testedRoutes = 0;
+        $warnings     = [];
+        foreach($routes as $route){
+            $validation = $this->testValidator->validateRoute($route);
+            if($validation['has_test']){
+                $testedRoutes++;
+            }
+            else{
+                $warnings[] = [
+                    'route'          => $route['method'] . ' /' . $route['uri'],
+                    'recommendation' => $validation['recommendations'][0] ?? 'Add test coverage',
+                ];
+            }
+        }
+        $coverage = $totalRoutes > 0 ? round(($testedRoutes / $totalRoutes) * 100, 2) : 0;
+        $this->info("Total Routes: $totalRoutes");
+        $this->info("Tested Routes: $testedRoutes");
+        $this->info("Coverage: $coverage%");
+        if(!empty($warnings) && $this->option('show-warnings')){
+            $this->newLine();
+            $this->warn('Routes Missing Tests:');
+            foreach($warnings as $warning){
+                $this->line("  • {$warning['route']}");
+                $this->line("    {$warning['recommendation']}");
+            }
+        }
+        $this->newLine();
     }
 }

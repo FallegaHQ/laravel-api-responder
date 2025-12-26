@@ -325,7 +325,23 @@ class GenerateDocumentationCommand extends Command{
         $reflection      = new ReflectionClass($dtoClass);
         $schemaName      = class_basename($dtoClass);
         $properties      = [];
-        // Get computed fields from DTO
+        
+        // Extract model attributes if model class is provided
+        if($modelClass && class_exists($modelClass)){
+            $properties = $this->extractModelAttributes($modelClass, $dtoClass);
+        }
+        
+        // Auto-detect relationships from model if available (BEFORE computed fields)
+        // This allows computed fields to override relationship properties
+        if($modelClass && class_exists($modelClass) && config(
+                'api-responder.nested_dtos.auto_detect_relationships',
+                true
+            )){
+            $relationshipProperties = $this->detectModelRelationships($modelClass, $schemas, $processedDtos, $depth);
+            $properties             = array_merge($properties, $relationshipProperties);
+        }
+        
+        // Get computed fields from DTO (these override relationships with same name)
         foreach($reflection->getMethods(ReflectionMethod::IS_PUBLIC) as $method){
             if(str_starts_with($method->getName(), '__') || $method->getDeclaringClass()
                                                                    ->getName() !== $dtoClass){
@@ -341,14 +357,6 @@ class GenerateDocumentationCommand extends Command{
                     'description' => 'Computed field from ' . $method->getName(),
                 ];
             }
-        }
-        // Auto-detect relationships from model if available
-        if($modelClass && class_exists($modelClass) && config(
-                'api-responder.nested_dtos.auto_detect_relationships',
-                true
-            )){
-            $relationshipProperties = $this->detectModelRelationships($modelClass, $schemas, $processedDtos, $depth);
-            $properties             = array_merge($properties, $relationshipProperties);
         }
         // Add note about model attributes
         $description          = $modelClass ? 'DTO for ' . class_basename(
@@ -367,6 +375,72 @@ class GenerateDocumentationCommand extends Command{
         }
 
         return strtolower(preg_replace('/(?<!^)[A-Z]/', '_$0', $methodName));
+    }
+
+    protected function extractModelAttributes(string $modelClass, string $dtoClass): array{
+        $properties = [];
+        
+        try{
+            $model = new $modelClass();
+            
+            // Get fillable attributes
+            $fillable = $model->getFillable();
+            
+            // Get casts for type information
+            $casts = method_exists($model, 'getCasts') ? $model->getCasts() : [];
+            
+            // Get hidden fields from DTO if it has getHiddenFields method
+            $hiddenFields = [];
+            if(class_exists($dtoClass)){
+                try{
+                    $dtoInstance = new $dtoClass($model);
+                    $dtoReflection = new \ReflectionClass($dtoClass);
+                    if($dtoReflection->hasMethod('getHiddenFields')){
+                        $method = $dtoReflection->getMethod('getHiddenFields');
+                        $method->setAccessible(true);
+                        $hiddenFields = $method->invoke($dtoInstance);
+                    }
+                }
+                catch(\Throwable){
+                    // If DTO instantiation fails, continue without hidden fields
+                }
+            }
+            
+            // Build properties from fillable attributes
+            foreach($fillable as $attribute){
+                // Skip hidden fields
+                if(in_array($attribute, $hiddenFields, true)){
+                    continue;
+                }
+                
+                // Determine type from casts or default to string
+                $type = 'string';
+                if(isset($casts[$attribute])){
+                    $type = $this->mapCastToOpenApiType($casts[$attribute]);
+                }
+                
+                $properties[$attribute] = [
+                    'type' => $type,
+                ];
+            }
+        }
+        catch(\Throwable){
+            // If model instantiation fails, return empty properties
+        }
+        
+        return $properties;
+    }
+    
+    protected function mapCastToOpenApiType(string $cast): string{
+        // Handle cast types like 'boolean', 'integer', 'datetime', etc.
+        return match(true){
+            str_contains($cast, 'int') => 'integer',
+            str_contains($cast, 'bool') => 'boolean',
+            str_contains($cast, 'float') || str_contains($cast, 'double') || str_contains($cast, 'decimal') => 'number',
+            str_contains($cast, 'array') || str_contains($cast, 'json') || str_contains($cast, 'collection') => 'array',
+            str_contains($cast, 'date') || str_contains($cast, 'time') => 'string',
+            default => 'string',
+        };
     }
 
     protected function inferType(ReflectionMethod $method): string{
@@ -393,30 +467,46 @@ class GenerateDocumentationCommand extends Command{
         $properties = [];
         try{
             $reflection = new ReflectionClass($modelClass);
+            
             foreach($reflection->getMethods(ReflectionMethod::IS_PUBLIC) as $method){
                 // Skip magic methods and inherited methods
                 if(str_starts_with($method->getName(), '__') || $method->getDeclaringClass()
                                                                        ->getName() !== $modelClass){
                     continue;
                 }
-                // Check if method returns a Relation
-                $returnType = $method->getReturnType();
-                if(!$returnType){
-                    continue;
-                }
-                $returnTypeName = $returnType->getName();
-                if(!is_subclass_of($returnTypeName, Relation::class)){
-                    continue;
-                }
+                
                 $relationName = $method->getName();
-                // Try to find the related model's DTO
-                $relatedDto = $this->findRelatedModelDto($modelClass, $relationName);
-                if(!$relatedDto){
+                
+                // Try to call the method to check if it returns a Relation
+                // Use a fresh instance for each relationship to avoid state issues
+                try{
+                    if($method->getNumberOfParameters() > 0){
+                        continue; // Skip methods that require parameters
+                    }
+                    
+                    // Create a new instance for each relationship check
+                    $instance = $reflection->newInstanceWithoutConstructor();
+                    $result = $instance->$relationName();
+                    
+                    if(!($result instanceof Relation)){
+                        continue;
+                    }
+                    $returnTypeName = get_class($result);
+                }
+                catch(\Throwable $e){
+                    // Silently skip methods that fail (not relationships)
                     continue;
                 }
+                // Try to find the related model's DTO
+                $relatedDtoInfo = $this->findRelatedModelDto($modelClass, $relationName);
+                if(!$relatedDtoInfo){
+                    continue;
+                }
+                $relatedDto = $relatedDtoInfo['dto'];
+                $relatedModel = $relatedDtoInfo['model'];
                 $relatedSchemaName = class_basename($relatedDto);
-                // Recursively build related DTO schema
-                $this->buildDtoSchema($relatedDto, null, $schemas, $processedDtos, $depth + 1);
+                // Recursively build related DTO schema with the related model
+                $this->buildDtoSchema($relatedDto, $relatedModel, $schemas, $processedDtos, $depth + 1);
                 // Determine if it's a collection relationship
                 $isCollection = $this->isCollectionRelationship($returnTypeName);
                 if($isCollection){
@@ -437,14 +527,15 @@ class GenerateDocumentationCommand extends Command{
                 }
             }
         }
-        catch(Throwable){
-            // Ignore errors
+        catch(\Throwable $e){
+            // Log error for debugging but continue
+            // In production, this silently fails to avoid breaking doc generation
         }
 
         return $properties;
     }
 
-    protected function findRelatedModelDto(string $modelClass, string $relationName): ?string{
+    protected function findRelatedModelDto(string $modelClass, string $relationName): ?array{
         try{
             // Instantiate the model to get the relationship
             $reflection = new ReflectionClass($modelClass);
@@ -458,7 +549,10 @@ class GenerateDocumentationCommand extends Command{
             $relatedReflection = new ReflectionClass($relatedModel);
             $attributes        = $relatedReflection->getAttributes(UseDto::class);
             if(!empty($attributes)){
-                return $attributes[0]->newInstance()->dtoClass;
+                return [
+                    'dto' => $attributes[0]->newInstance()->dtoClass,
+                    'model' => $relatedModel,
+                ];
             }
         }
         catch(Throwable){

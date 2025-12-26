@@ -394,7 +394,8 @@ The package provides powerful attributes for documenting your API endpoints:
 
 | Attribute | Target | Purpose | Parameters |
 |-----------|--------|---------|------------|
-| `#[ApiDescription]` | Method | Custom summary and description | `summary`, `description`, `requiresAuth` |
+| `#[ApiDescription]` | Method | Custom summary and description | `summary`, `description` |
+| `#[ApiRequiresAuth]` | Method/Class | Mark endpoint as requiring authentication | `requiresAuth` (default: true) |
 | `#[ApiParam]` | Method | Query parameter documentation | `name`, `type`, `description`, `required`, `example`, `minimum`, `maximum`, `enum`, `format` |
 | `#[ApiTag]` | Class/Method | Categorize endpoints | `tags` (string or array) |
 | `#[ApiGroup]` | Class/Method | Group with description | `name`, `description`, `priority` |
@@ -413,10 +414,28 @@ The package provides powerful attributes for documenting your API endpoints:
 ```php
 #[ApiDescription(
     summary: 'Create new post',
-    description: 'Creates a new blog post with validation',
-    requiresAuth: true  // Marks as protected in docs
+    description: 'Creates a new blog post with validation'
 )]
 public function store(Request $request) { }
+```
+
+#### `#[ApiRequiresAuth]` - Manual Authentication Marking
+
+```php
+// Authentication is auto-detected from middleware (auth, auth:sanctum, etc.)
+// Use this attribute only when you need to manually override detection
+
+// On a specific method
+#[ApiRequiresAuth]
+public function sensitiveOperation() { }
+
+// On entire controller (all methods require auth)
+#[ApiRequiresAuth]
+class AdminController extends BaseApiController { }
+
+// Explicitly mark as NOT requiring auth (override middleware detection)
+#[ApiRequiresAuth(requiresAuth: false)]
+public function publicEndpoint() { }
 ```
 
 #### `#[ApiParam]` - Query Parameters (Repeatable)
@@ -520,6 +539,53 @@ class User extends Model {
         'enum' => ['admin', 'user', 'moderator'], // Explicit
     ],
 ])]
+```
+
+## Authentication Detection
+
+The package **automatically detects protected routes** from middleware and marks them with the `security` field in OpenAPI documentation.
+
+### Automatic Detection
+
+Routes are automatically detected as requiring authentication if they use any of the configured auth middleware:
+
+```php
+// These routes are automatically marked as protected
+Route::middleware('auth:sanctum')->group(function () {
+    Route::get('/users', [UserController::class, 'index']);
+    Route::post('/posts', [PostController::class, 'store']);
+});
+```
+
+### Configure Auth Middleware
+
+Customize which middleware names indicate authentication in `config/api-responder.php`:
+
+```php
+'documentation' => [
+    'auth_middleware' => [
+        'auth',
+        'auth:api',
+        'auth:sanctum',
+        'auth.basic',
+        'can',
+        'custom-auth', // Add your custom auth middleware
+    ],
+],
+```
+
+### Manual Override
+
+Use `#[ApiRequiresAuth]` to manually mark endpoints when automatic detection isn't sufficient:
+
+```php
+// Force authentication requirement
+#[ApiRequiresAuth]
+public function sensitiveOperation() { }
+
+// Explicitly mark as public (override middleware detection)
+#[ApiRequiresAuth(requiresAuth: false)]
+public function publicEndpoint() { }
 ```
 
 ## Enum Support

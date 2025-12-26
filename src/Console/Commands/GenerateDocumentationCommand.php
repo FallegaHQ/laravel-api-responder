@@ -9,6 +9,7 @@ use FallegaHQ\ApiResponder\Attributes\ApiGroup;
 use FallegaHQ\ApiResponder\Attributes\ApiHidden;
 use FallegaHQ\ApiResponder\Attributes\ApiParam;
 use FallegaHQ\ApiResponder\Attributes\ApiRequest;
+use FallegaHQ\ApiResponder\Attributes\ApiRequiresAuth;
 use FallegaHQ\ApiResponder\Attributes\ApiResponse;
 use FallegaHQ\ApiResponder\Attributes\ApiTag;
 use FallegaHQ\ApiResponder\Attributes\UseDto;
@@ -350,7 +351,7 @@ class GenerateDocumentationCommand extends Command{
             $properties             = array_merge($properties, $relationshipProperties);
         }
         // Add note about model attributes
-        $description = $modelClass ? 'DTO for ' . class_basename(
+        $description          = $modelClass ? 'DTO for ' . class_basename(
                 $modelClass
             ) . ' (includes all model attributes + computed fields)' : 'Data Transfer Object with computed fields';
         $schemas[$schemaName] = [
@@ -682,12 +683,7 @@ class GenerateDocumentationCommand extends Command{
                         if(!empty($attributes)){
                             $instance = $attributes[0]->newInstance();
                             if($instance->description){
-                                $desc = $instance->description;
-                                if($instance->requiresAuth){
-                                    $desc .= "\n\n**Authentication Required:** Yes";
-                                }
-
-                                return $desc;
+                                return $instance->description;
                             }
                         }
                     }
@@ -740,14 +736,17 @@ class GenerateDocumentationCommand extends Command{
         }
         // Use gatherMiddleware() to include middleware from parent groups
         $middleware = $routeObj->gatherMiddleware();
-        // Check for common auth middleware
-        $authMiddleware = [
-            'auth',
-            'auth:api',
-            'auth:sanctum',
-            'auth.basic',
-            'can',
-        ];
+        // Check for configured auth middleware
+        $authMiddleware = config(
+            'api-responder.documentation.auth_middleware',
+            [
+                'auth',
+                'auth:api',
+                'auth:sanctum',
+                'auth.basic',
+                'can',
+            ]
+        );
         foreach($authMiddleware as $auth){
             if(in_array($auth, $middleware, true) || $this->middlewareContains($middleware, $auth)){
                 return true;
@@ -763,12 +762,18 @@ class GenerateDocumentationCommand extends Command{
             if(class_exists($controller)){
                 try{
                     $reflection = new ReflectionClass($controller);
+                    // Check for ApiRequiresAuth on method
                     if($reflection->hasMethod($method)){
                         $methodReflection = $reflection->getMethod($method);
-                        $attributes       = $methodReflection->getAttributes(ApiDescription::class);
-                        if(!empty($attributes)){
-                            return $attributes[0]->newInstance()->requiresAuth;
+                        $authAttributes   = $methodReflection->getAttributes(ApiRequiresAuth::class);
+                        if(!empty($authAttributes)){
+                            return $authAttributes[0]->newInstance()->requiresAuth;
                         }
+                    }
+                    // Check for ApiRequiresAuth on controller class
+                    $classAuthAttributes = $reflection->getAttributes(ApiRequiresAuth::class);
+                    if(!empty($classAuthAttributes)){
+                        return $classAuthAttributes[0]->newInstance()->requiresAuth;
                     }
                 }
                 catch(Throwable){
@@ -1121,7 +1126,7 @@ class GenerateDocumentationCommand extends Command{
         // Check for file uploads
         $fileUploads = $this->extractFileUploads($route);
         $hasFiles    = !empty($fileUploads);
-        $dataSchema = [
+        $dataSchema  = [
             'type'        => 'object',
             'description' => 'Request data',
         ];
@@ -1351,7 +1356,6 @@ class GenerateDocumentationCommand extends Command{
     }
 
     // ==================== ROUTE FILTERING ====================
-
     protected function getTagDescription(string $tag, array $route): string{
         // Check for ApiGroup attribute
         $action = $route['action'];
@@ -1552,7 +1556,6 @@ class GenerateDocumentationCommand extends Command{
     }
 
     // ==================== DEPRECATION SUPPORT ====================
-
     protected function buildErrorSchemas(): array{
         return [
             'ErrorResponse'   => [
@@ -1613,7 +1616,6 @@ class GenerateDocumentationCommand extends Command{
     }
 
     // ==================== ENUM DETECTION ====================
-
     protected function buildGlobalResponses(): array{
         return [
             'BadRequest'      => [
@@ -1789,7 +1791,6 @@ class GenerateDocumentationCommand extends Command{
     }
 
     // ==================== FILE UPLOAD SUPPORT ====================
-
     protected function detectPhpEnum(string $type): ?array{
         if(!class_exists($type)){
             return null;

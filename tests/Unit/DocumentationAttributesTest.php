@@ -4,6 +4,7 @@ namespace FallegaHQ\ApiResponder\Tests\Unit;
 use FallegaHQ\ApiResponder\Attributes\ApiDescription;
 use FallegaHQ\ApiResponder\Attributes\ApiGroup;
 use FallegaHQ\ApiResponder\Attributes\ApiParam;
+use FallegaHQ\ApiResponder\Attributes\ApiRequiresAuth;
 use FallegaHQ\ApiResponder\Attributes\ApiTag;
 use FallegaHQ\ApiResponder\Console\Commands\GenerateDocumentationCommand;
 use FallegaHQ\ApiResponder\Tests\TestCase;
@@ -193,7 +194,8 @@ class TestController{
     #[ApiDescription(summary: 'Custom endpoint summary', description: 'This is a detailed description')]
     public function methodWithDescription(): void{}
 
-    #[ApiDescription(summary: 'Protected endpoint', description: 'Requires authentication', requiresAuth: true)]
+    #[ApiDescription(summary: 'Protected endpoint', description: 'Requires authentication')]
+    #[ApiRequiresAuth]
     public function protectedMethod(): void{}
 
     #[ApiParam('page', 'integer', 'Page number', required: false, example: 1)]

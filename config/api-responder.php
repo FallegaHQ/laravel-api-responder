@@ -220,6 +220,22 @@ return [
     ],
     /*
     |--------------------------------------------------------------------------
+    | API Documentation Generation
+    |--------------------------------------------------------------------------
+    | Configure OpenAPI documentation generation behavior
+    */
+    'documentation'      => [
+        // Middleware names that indicate authentication is required
+        'auth_middleware' => [
+            'auth',
+            'auth:api',
+            'auth:sanctum',
+            'auth.basic',
+            'can',
+        ],
+    ],
+    /*
+    |--------------------------------------------------------------------------
     | Nested DTOs and Relationships
     |--------------------------------------------------------------------------
     | Configure how nested DTOs and Eloquent relationships are handled.

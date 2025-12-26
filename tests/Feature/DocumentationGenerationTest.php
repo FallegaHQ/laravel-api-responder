@@ -7,6 +7,7 @@ use FallegaHQ\ApiResponder\Attributes\ApiFileUpload;
 use FallegaHQ\ApiResponder\Attributes\ApiGroup;
 use FallegaHQ\ApiResponder\Attributes\ApiHidden;
 use FallegaHQ\ApiResponder\Attributes\ApiParam;
+use FallegaHQ\ApiResponder\Attributes\ApiRequiresAuth;
 use FallegaHQ\ApiResponder\Attributes\ApiResponse;
 use FallegaHQ\ApiResponder\Attributes\ApiTag;
 use FallegaHQ\ApiResponder\Attributes\UseDto;
@@ -75,7 +76,7 @@ class DocumentationGenerationTest extends TestCase{
         $this->assertNotNull($protectedRoute);
         $isProtected = $method->invoke($command, $protectedRoute);
         $this->assertTrue($isProtected, 'Route with auth:api middleware should be detected as protected');
-        // Test 2: Route with ApiDescription requiresAuth attribute
+        // Test 2: Route with ApiRequiresAuth attribute
         // Register route so it exists in route collection for attribute check to work
         Route::get(
             'api/attr-protected',
@@ -99,7 +100,7 @@ class DocumentationGenerationTest extends TestCase{
         $isAttrProtected = $method->invoke($command, $attrRoute);
         $this->assertTrue(
             $isAttrProtected,
-            'Route with ApiDescription requiresAuth=true should be detected as protected'
+            'Route with ApiRequiresAuth attribute should be detected as protected'
         );
     }
 
@@ -120,7 +121,6 @@ class DocumentationGenerationTest extends TestCase{
         $this->assertEquals('Custom Summary', $summary);
         $description = $descMethod->invoke($command, $route, 'get', null);
         $this->assertStringContainsString('This is a custom description', $description);
-        $this->assertStringContainsString('Authentication Required:', $description);
     }
 
     /**
@@ -345,12 +345,14 @@ class TestDocController extends BaseApiController{
         return $this->success([]);
     }
 
-    #[ApiDescription(summary: 'Protected Endpoint', description: 'This endpoint requires authentication', requiresAuth: true)]
+    #[ApiDescription(summary: 'Protected Endpoint', description: 'This endpoint requires authentication')]
+    #[ApiRequiresAuth]
     public function protectedEndpoint(): JsonResponse{
         return $this->success([]);
     }
 
-    #[ApiDescription(summary: 'Custom Summary', description: 'This is a custom description for testing', requiresAuth: true)]
+    #[ApiDescription(summary: 'Custom Summary', description: 'This is a custom description for testing')]
+    #[ApiRequiresAuth]
     public function customDescription(): JsonResponse{
         return $this->success([]);
     }

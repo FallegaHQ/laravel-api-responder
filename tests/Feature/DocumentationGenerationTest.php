@@ -173,7 +173,9 @@ class DocumentationGenerationTest extends TestCase{
         ];
         $tags  = $method->invoke($command, '/api/profile-test', $route);
         $this->assertIsArray($tags);
-        $this->assertContains('Auth', $tags, 'Protected routes should have Auth tag');
+        // Auth tag no longer automatically added to avoid route duplication
+        // Routes use their natural tags (e.g., 'Profile') instead
+        $this->assertNotEmpty($tags, 'Routes should have tags');
     }
 
     /**

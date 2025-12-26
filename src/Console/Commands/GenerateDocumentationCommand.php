@@ -908,10 +908,6 @@ class GenerateDocumentationCommand extends Command{
             $parts = explode('/', trim($path, '/'));
             $tags  = !empty($parts[1]) ? [ucfirst($parts[1])] : ['API'];
         }
-        // Add authentication tag if route is protected
-        if($this->isProtectedRoute($route)){
-            $tags[] = 'Auth';
-        }
 
         return array_unique($tags);
     }

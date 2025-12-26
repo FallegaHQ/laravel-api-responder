@@ -256,14 +256,40 @@ abstract class BaseDTO implements Transformable{
                                                                    ->getName() !== get_class($this->source)){
                 continue;
             }
-            // Check if method returns a Relation
-            $returnType = $method->getReturnType();
-            if(!$returnType){
-                continue;
+            
+            $relationName = $method->getName();
+            
+            // Try to call the method to check if it returns a Relation
+            // This works even without return type hints
+            try{
+                if($method->getNumberOfParameters() > 0){
+                    continue; // Skip methods that require parameters
+                }
+                
+                // Create a fresh instance to avoid state issues
+                $instance = $reflection->newInstanceWithoutConstructor();
+                $result = $instance->$relationName();
+                
+                if(!($result instanceof Relation)){
+                    continue;
+                }
+                
+                // At depth > 0, only include BelongsTo relationships to prevent circular references
+                // This means: Page->User (yes), but User->Pages (no when nested)
+                if($this->nestingDepth > 0){
+                    $relationClass = get_class($result);
+                    // Only include BelongsTo (not BelongsToMany!) when nested
+                    $isBelongsTo = str_ends_with($relationClass, 'BelongsTo');
+                    if(!$isBelongsTo){
+                        continue;
+                    }
+                }
+                
+                $relationships[$relationName] = get_class($result);
             }
-            $returnTypeName = $returnType->getName();
-            if(is_subclass_of($returnTypeName, Relation::class)){
-                $relationships[$method->getName()] = $returnTypeName;
+            catch(\Throwable){
+                // Silently skip methods that fail (not relationships)
+                continue;
             }
         }
 
@@ -301,6 +327,11 @@ abstract class BaseDTO implements Transformable{
         if($relationValue instanceof Collection){
             return $relationValue->map(
                 function($item) use ($dtoClass, $user){
+                    // Remove pivot data from BelongsToMany relationships
+                    if($item instanceof Model && $item->relationLoaded('pivot')){
+                        $item->unsetRelation('pivot');
+                    }
+                    
                     $dto               = new $dtoClass($item);
                     $dto->nestingDepth = $this->nestingDepth + 1;
 

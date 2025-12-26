@@ -135,7 +135,8 @@ class DocumentationAttributesTest extends TestCase{
             'action' => TestController::class . '@protectedMethod',
         ];
         $tags       = $method->invoke($command, '/test-auth-tag', $route);
-        $this->assertContains('Auth', $tags);
+        // Auth tag no longer automatically added (removed in v1.2.3)
+        $this->assertIsArray($tags);
     }
 
     /**

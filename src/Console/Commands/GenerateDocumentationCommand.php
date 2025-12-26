@@ -726,9 +726,16 @@ class GenerateDocumentationCommand extends Command{
     protected function isProtectedRoute(array $route): bool{
         // Check middleware for auth
         /** @var RouteBase|null $routeObj */
-        $routeObj = collect(Route::getRoutes())->first(
-            function($r) use ($route){
-                return $r->uri() === $route['uri'] && in_array(strtoupper($route['method']), $r->methods(), true);
+        $routeMethods = array_map('strtoupper', explode('|', $route['method']));
+        $routeObj     = collect(Route::getRoutes())->first(
+            function($r) use ($route, $routeMethods){
+                // Check if URI matches and if any of the route methods match
+                if($r->uri() !== $route['uri']){
+                    return false;
+                }
+
+                // Check if there's any overlap between route methods and route object methods
+                return !empty(array_intersect($routeMethods, $r->methods()));
             }
         );
         if(!$routeObj){
